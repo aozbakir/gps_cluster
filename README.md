@@ -1,6 +1,6 @@
 # gps_cluster
 
-Add a short description here!
+Clustering of GPS-derived velocities using Hierarchical Agglomerative Clustering (HAC, e.g. Simpson et al., 2012). HAC begin with each observation being its own cluster, then sequentially combines similar observations or clusters until all the observations are gouped into a single cluster. Each merging can be represented with a dendrogram. This is essentially a linkage graph with intercluster distances in the y-axis. Then using th dendrogram, gap statistics and a priori deformation indicators optmal number of clusters is determined.
 
 ## Description
 
