@@ -10,7 +10,8 @@ A longer description of your project goes here...
 
 In order to set up the necessary environment:
 
-1. review and uncomment what you need in `environment.yml` and create an environment `gps_cluster` with the help of [conda]:
+1. review and uncomment what you need in `environment.yml` and create an
+environment `gps_cluster` with the help of [conda]:
    ```
    conda env create -f environment.yml
    ```
