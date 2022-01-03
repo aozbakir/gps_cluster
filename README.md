@@ -1,6 +1,13 @@
 # gps_cluster
 
-Clustering of GPS-derived velocities using Hierarchical Agglomerative Clustering (HAC, e.g. Simpson et al., 2012). HAC begins with each observation being its own cluster, then sequentially combines similar observations or clusters until all the observations are gouped into a single cluster. Each merging can be represented with a dendrogram. This is essentially a linkage graph with intercluster distances in the y-axis. Then using th dendrogram, gap statistics and a priori deformation indicators optmal number of clusters is determined.
+Clustering of GPS-derived velocities using Hierarchical Agglomerative
+Clustering (HAC, e.g. Simpson et al., 2012). HAC begins with each observation
+being its own cluster, then sequentially combines similar observations or
+clusters until all the observations are gouped into a single cluster. Each
+merging can be represented with a dendrogram. This is essentially a linkage
+graph with intercluster distances in the y-axis. Then using th dendrogram, gap
+statistics and a priori deformation indicators optmal number of clusters is
+determined.
 
 ## Description
 
@@ -11,54 +18,43 @@ A longer description of your project goes here...
 In order to set up the necessary environment:
 
 1. review and uncomment what you need in `environment.yml` and create an
-environment `gps_cluster` with the help of [conda]:
-   ```
-   conda env create -f environment.yml
-   ```
-2. activate the new environment with:
-   ```
-   conda activate gps_cluster
-   ```
+   environment `gps_cluster` with the help of [conda]: ``` conda env create -f
+environment.yml ```
+2. activate the new environment with: ``` conda activate gps_cluster ```
 
-> **_NOTE:_**  The conda environment will have gps_cluster installed in editable mode.
-> Some changes, e.g. in `setup.cfg`, might require you to run `pip install -e .` again.
+> **_NOTE:_**  The conda environment will have gps_cluster installed in
+> editable mode.  Some changes, e.g. in `setup.cfg`, might require you to run
+> `pip install -e .` again.
 
 
 Optional and needed only once after `git clone`:
 
-3. install several [pre-commit] git hooks with:
-   ```bash
-   pre-commit install
-   # You might also want to run `pre-commit autoupdate`
-   ```
-   and checkout the configuration under `.pre-commit-config.yaml`.
-   The `-n, --no-verify` flag of `git commit` can be used to deactivate pre-commit hooks temporarily.
+3. install several [pre-commit] git hooks with: ```bash pre-commit install #
+You might also want to run `pre-commit autoupdate` ``` and checkout the
+configuration under `.pre-commit-config.yaml`.  The `-n, --no-verify` flag of
+`git commit` can be used to deactivate pre-commit hooks temporarily.
 
-4. install [nbstripout] git hooks to remove the output cells of committed notebooks with:
-   ```bash
-   nbstripout --install --attributes notebooks/.gitattributes
-   ```
-   This is useful to avoid large diffs due to plots in your notebooks.
-   A simple `nbstripout --uninstall` will revert these changes.
+4. install [nbstripout] git hooks to remove the output cells of committed
+notebooks with: ```bash nbstripout --install --attributes
+notebooks/.gitattributes ``` This is useful to avoid large diffs due to plots
+in your notebooks.  A simple `nbstripout --uninstall` will revert these
+changes.
 
 
 Then take a look into the `scripts` and `notebooks` folders.
 
 ## Dependency Management & Reproducibility
 
-1. Always keep your abstract (unpinned) dependencies updated in `environment.yml` and eventually
-   in `setup.cfg` if you want to ship and install your package via `pip` later on.
-2. Create concrete dependencies as `environment.lock.yml` for the exact reproduction of your
-   environment with:
-   ```bash
-   conda env export -n gps_cluster -f environment.lock.yml
-   ```
-   For multi-OS development, consider using `--no-builds` during the export.
-3. Update your current environment with respect to a new `environment.lock.yml` using:
-   ```bash
-   conda env update -f environment.lock.yml --prune
-   ```
-## Project Organization
+1. Always keep your abstract (unpinned) dependencies updated in
+`environment.yml` and eventually in `setup.cfg` if you want to ship and install
+your package via `pip` later on.
+2. Create concrete dependencies as `environment.lock.yml` for the exact
+reproduction of your environment with: ```bash conda env export -n gps_cluster
+-f environment.lock.yml ``` For multi-OS development, consider using
+`--no-builds` during the export.
+3. Update your current environment with respect to a new `environment.lock.yml`
+using: ```bash conda env update -f environment.lock.yml --prune ``` ## Project
+Organization
 
 ```
 ├── AUTHORS.md              <- List of developers and maintainers.
