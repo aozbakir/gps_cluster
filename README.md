@@ -1,3 +1,4 @@
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/aozbakir/gps_cluster/main)
 # gps_cluster
 
 Clustering of GPS-derived velocities using Hierarchical Agglomerative
