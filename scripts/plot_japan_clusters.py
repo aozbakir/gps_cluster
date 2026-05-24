@@ -28,7 +28,7 @@ from scipy.cluster.hierarchy import linkage
 from gps_cluster.application.euler_clustering import EulerVectorClustering
 from gps_cluster.application.preprocess import preprocess
 from gps_cluster.application.velocity_clustering import VelocityHACClustering
-from gps_cluster.domain.services.euler_math import euler_vector_to_pole, predict_velocity
+from gps_cluster.domain.services.euler_math import euler_vector_to_pole, predict_velocity, total_chi_squared
 from gps_cluster.infrastructure.readers.velocity_csv import read_velocity_file
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -39,11 +39,67 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 # ── load data ─────────────────────────────────────────────────────────────────
 raw      = read_velocity_file(DATA)
-stations = preprocess(raw)
+# Paper (Savage 2018) uses all 469 stations from the supplementary table with
+# minimal preprocessing.  Use max_sigma=99 to keep all 468 stations we have.
+stations = preprocess(raw, max_sigma=99, zscore_threshold=99)
 print(f"Stations: raw={len(raw)}, clean={len(stations)}")
 
 EXTENT = [128.0, 139.5, 31.0, 38.5]   # [lon_min, lon_max, lat_min, lat_max]
 CMAP   = plt.colormaps["tab10"]
+
+
+def _geo_init_labels(stations_list, k):
+    """Geographic block initialization for SW Japan (Savage 2018 comparison).
+
+    In strongly loaded subduction-zone datasets the velocity-HAC initialization
+    converges to iso-velocity bands rather than tectonic plates.  This function
+    seeds clusters by velocity regime so the iterative Euler algorithm starts
+    in the geographically coherent basin:
+
+      * Vn < -20 mm/yr → Ryukyu high-loading zone (separate seed)
+      * Ve > +20 mm/yr (and Vn >= -20) → fast-eastward zone (separate seed)
+      * Remainder → main block
+
+    For k > 3 the main block is further split by velocity-HAC.
+    """
+    import numpy as np
+    from scipy.cluster.hierarchy import fcluster, linkage
+
+    n = len(stations_list)
+    vns = np.array([s.velocity.vn for s in stations_list])
+    ves = np.array([s.velocity.ve  for s in stations_list])
+
+    if k == 1 or n < 10:
+        X = np.array([[s.velocity.ve, s.velocity.vn] for s in stations_list])
+        return fcluster(linkage(X, method="centroid"), t=k, criterion="maxclust")
+
+    # Identify the two distinctive velocity regimes
+    is_loading  = vns < -20.0                        # Ryukyu extreme southward
+    is_fast_e   = (~is_loading) & (ves > 20.0)      # fast-eastward (not already loading)
+    is_main     = ~(is_loading | is_fast_e)
+
+    labels = np.zeros(n, dtype=int)
+    labels[is_main]    = 1
+    labels[is_loading] = 2
+    if k == 2:
+        labels[is_fast_e] = 1   # merge fast-east into main for k=2
+        return labels
+    labels[is_fast_e]  = 3
+    if k == 3:
+        return labels
+
+    # k >= 4: further split the main block by velocity HAC
+    main_idx = np.where(is_main)[0]
+    X_main = np.array([[stations_list[i].velocity.ve,
+                        stations_list[i].velocity.vn] for i in main_idx])
+    sub = fcluster(linkage(X_main, method="centroid"),
+                   t=k - 2, criterion="maxclust")
+    labels[main_idx] = sub + 2                       # shift past clusters 1, 2
+    # Renumber labels 1..k consecutively
+    for new_id, old_id in enumerate(np.unique(labels), start=1):
+        labels[labels == old_id] = -new_id
+    labels = -labels
+    return labels
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -192,7 +248,9 @@ plt.close(fig)
 # Figure 4 — Euler chi² vs k (elbow)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 4: Euler chi² vs k …")
-evc = EulerVectorClustering()
+# "multiscale" tries 5 deterministic + 20 random initializations and keeps the
+# minimum-chi² result — more robust in datasets with strong interseismic loading.
+evc = EulerVectorClustering(init="multiscale", n_restarts=20, random_seed=0)
 k_euler, ftest = evc.find_optimal_k(stations, max_k=9)
 print(f"  F-test optimal k = {k_euler}")
 
@@ -224,7 +282,8 @@ plt.close(fig)
 # Figure 5 — Map: k=3 clusters + Euler poles  (main comparison figure)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 5: k=3 cluster map …")
-clusters3 = evc.cluster(stations, k=3)
+clusters3 = evc.cluster(stations, k=3,
+                         init_labels=_geo_init_labels(stations, 3))
 
 fig, ax = plt.subplots(figsize=(11, 8),
                        subplot_kw={"projection": ccrs.Mercator()})
@@ -249,7 +308,10 @@ legend_handles.append(Line2D([0], [0], lw=0, marker="*",
                               markersize=11, markeredgecolor="k", markeredgewidth=0.5,
                               color="gray", label="Euler pole (if in region)"))
 ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.9)
-ax.set_title("Euler-vector clustering  k = 3\n"
+chi2_k3 = sum(total_chi_squared(c.stations, c.euler_vector)
+              for c in clusters3 if c.euler_vector is not None)
+dof_k3  = 2 * len(stations) - 3 * 3
+ax.set_title(f"Euler-vector clustering  k = 3   χ²_red = {chi2_k3/dof_k3:.0f}\n"
              "Southwest Japan GPS velocities (ITRF2000)", fontsize=11)
 fig.tight_layout()
 fig.savefig(OUT / "fig5_clusters_k3.png", dpi=180, bbox_inches="tight")
@@ -307,7 +369,8 @@ axes = axes.flatten()
 
 for ax, k in zip(axes, [2, 3, 4, 5]):
     _basemap(ax)
-    clusters_k = evc.cluster(stations, k=k)
+    clusters_k = evc.cluster(stations, k=k,
+                              init_labels=_geo_init_labels(stations, k))
     for c in clusters_k:
         col  = CMAP(c.id - 1)
         pole = euler_vector_to_pole(c.euler_vector)

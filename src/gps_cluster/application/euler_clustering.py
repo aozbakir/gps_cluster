@@ -68,27 +68,71 @@ class EulerVectorClustering:
         Maximum number of reassignment iterations per k.
     min_stations:
         Minimum stations required to invert a valid Euler vector for a cluster.
-        Clusters that fall below this threshold are merged into the nearest
-        cluster by velocity residual.
+    init:
+        Initialization strategy for the iterative algorithm.
+        ``"velocity"`` (default) — velocity-space HAC; finds the global chi²
+        minimum but may converge to velocity-magnitude bands in datasets where
+        interseismic elastic loading dominates (e.g. subduction zones).
+        ``"multiscale"`` — runs *n_restarts* random restarts plus geographic
+        and velocity initializations; returns the partition with minimum total
+        chi²; more expensive but more robust.
+    n_restarts:
+        Number of additional random restarts used when ``init="multiscale"``.
+    random_seed:
+        Seed for random restarts.
     """
 
-    def __init__(self, max_iter: int = 100, min_stations: int = _MIN_STATIONS_PER_CLUSTER) -> None:
+    def __init__(
+        self,
+        max_iter: int = 100,
+        min_stations: int = _MIN_STATIONS_PER_CLUSTER,
+        init: str = "velocity",
+        n_restarts: int = 20,
+        random_seed: int = 0,
+    ) -> None:
         self.max_iter = max_iter
         self.min_stations = min_stations
+        self.init = init
+        self.n_restarts = n_restarts
+        self.random_seed = random_seed
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def cluster(self, stations: list[GpsStation], k: int) -> list[VelocityCluster]:
+    def cluster(
+        self,
+        stations: list[GpsStation],
+        k: int,
+        init_labels: np.ndarray | None = None,
+    ) -> list[VelocityCluster]:
         """Partition stations into k clusters via Euler-vector iteration.
+
+        Parameters
+        ----------
+        stations:
+            List of GPS stations to cluster.
+        k:
+            Number of clusters.
+        init_labels:
+            Optional 1-indexed integer array of length ``len(stations)`` that
+            provides the initial cluster assignment.  When supplied, the
+            ``init`` strategy is ignored.  Useful for passing domain-specific
+            starting partitions (e.g. geographic zones for subduction-zone data
+            where the default velocity-HAC initialization converges to
+            iso-velocity bands rather than tectonic plates).
 
         Returns a list of VelocityCluster objects with euler_vector set.
         """
         if k >= len(stations):
             raise ValueError(f"k={k} must be less than the number of stations ({len(stations)})")
 
-        labels = self._initial_labels(stations, k)
+        if init_labels is not None:
+            labels = np.asarray(init_labels, dtype=int)
+        elif self.init == "multiscale":
+            labels = self._multiscale_init(stations, k)
+        else:
+            labels = self._initial_labels(stations, k)
         labels = self._iterate(stations, labels, k)
         return self._build_clusters(stations, labels, k)
 
@@ -148,6 +192,67 @@ class EulerVectorClustering:
         X = np.array([[s.velocity.ve, s.velocity.vn] for s in stations])
         Z = linkage(X, method="centroid", metric="euclidean")
         return fcluster(Z, t=k, criterion="maxclust")
+
+    def _candidate_inits(self, stations: list[GpsStation], k: int) -> list[np.ndarray]:
+        """Return a list of candidate initial label arrays for multiscale init."""
+        from gps_cluster.domain.services.euler_math import invert_euler_vector, predict_velocity
+
+        candidates: list[np.ndarray] = []
+        n = len(stations)
+
+        # 1. Velocity HAC (centroid)
+        X_vel = np.array([[s.velocity.ve, s.velocity.vn] for s in stations])
+        Z = linkage(X_vel, method="centroid")
+        candidates.append(fcluster(Z, t=k, criterion="maxclust"))
+
+        # 2. Velocity HAC (ward)
+        Z = linkage(X_vel, method="ward")
+        candidates.append(fcluster(Z, t=k, criterion="maxclust"))
+
+        # 3. Geographic HAC (ward on lon/lat)
+        X_geo = np.array([[s.position.lon, s.position.lat] for s in stations])
+        Z = linkage(X_geo, method="ward")
+        candidates.append(fcluster(Z, t=k, criterion="maxclust"))
+
+        # 4. Residual HAC: velocity residuals relative to single best-fit Euler vector
+        k1_euler = invert_euler_vector(stations)
+        X_res = np.array([
+            [s.velocity.ve - predict_velocity(s, k1_euler)[0],
+             s.velocity.vn - predict_velocity(s, k1_euler)[1]]
+            for s in stations
+        ])
+        Z = linkage(X_res, method="ward")
+        candidates.append(fcluster(Z, t=k, criterion="maxclust"))
+
+        # 5. Combined velocity + geographic (scaled equally)
+        v_scale = max(X_vel.std(axis=0).max(), 1e-9)
+        g_scale = max(X_geo.std(axis=0).max(), 1e-9)
+        X_comb = np.hstack([X_vel / v_scale, X_geo / g_scale])
+        Z = linkage(X_comb, method="ward")
+        candidates.append(fcluster(Z, t=k, criterion="maxclust"))
+
+        # 6. Random restarts
+        rng = np.random.default_rng(self.random_seed)
+        for _ in range(self.n_restarts):
+            lbl = rng.integers(1, k + 1, size=n)
+            candidates.append(lbl)
+
+        return candidates
+
+    def _multiscale_init(self, stations: list[GpsStation], k: int) -> np.ndarray:
+        """Try many initializations; return the one with minimum total chi² after convergence."""
+        best_labels: np.ndarray | None = None
+        best_chi2 = np.inf
+
+        for init_labels in self._candidate_inits(stations, k):
+            labels = self._iterate(stations, init_labels.copy(), k)
+            clusters = self._build_clusters(stations, labels, k)
+            chi2 = self._total_chi2(clusters)
+            if chi2 < best_chi2:
+                best_chi2 = chi2
+                best_labels = labels.copy()
+
+        return best_labels  # type: ignore[return-value]
 
     def _euler_per_cluster(
         self, stations: list[GpsStation], labels: np.ndarray, k: int
