@@ -74,9 +74,18 @@ def _quiver(ax, stations_list, color, scale=20, **kw):
     q = ax.quiver(lons, lats, ve, vn,
                   transform=ccrs.PlateCarree(),
                   scale=scale, scale_units="xy",
-                  width=0.003, headwidth=4, headlength=5,
-                  color=color, alpha=0.85, zorder=3, **kw)
+                  width=0.004, headwidth=5, headlength=6,
+                  color=color, alpha=0.9, zorder=3, **kw)
     return q
+
+
+def _scatter(ax, stations_list, color, s=28):
+    """Plot colored station dots on a cartopy map."""
+    lons = np.array([s.position.lon for s in stations_list])
+    lats = np.array([s.position.lat for s in stations_list])
+    ax.scatter(lons, lats, s=s, color=color,
+               edgecolor="k", linewidths=0.3,
+               transform=ccrs.PlateCarree(), zorder=4)
 
 
 def _ref_arrow(ax, lon=138.5, lat=31.7, length=20, scale=20, label=True):
@@ -125,14 +134,14 @@ plt.close(fig)
 # Figure 2 — Velocity scatter (raw vs clean)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 2: velocity scatter …")
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
 for ax, s_list, title in [
         (ax1, raw,      f"Raw  (N={len(raw)})"),
         (ax2, stations, f"Preprocessed (N={len(stations)})")]:
     ve = [s.velocity.ve for s in s_list]
     vn = [s.velocity.vn for s in s_list]
-    ax.scatter(ve, vn, s=18, edgecolor="steelblue", facecolor="white",
-               linewidths=0.6, alpha=0.7)
+    ax.scatter(ve, vn, s=50, edgecolor="steelblue", facecolor="white",
+               linewidths=0.8, alpha=0.8)
     ax.axhline(0, color="gray", lw=0.5, ls="--")
     ax.axvline(0, color="gray", lw=0.5, ls="--")
     ax.set_xlabel("Ve  (mm/yr)", fontsize=11)
@@ -217,7 +226,7 @@ plt.close(fig)
 print("Plotting Fig 5: k=3 cluster map …")
 clusters3 = evc.cluster(stations, k=3)
 
-fig, ax = plt.subplots(figsize=(10, 7),
+fig, ax = plt.subplots(figsize=(11, 8),
                        subplot_kw={"projection": ccrs.Mercator()})
 _basemap(ax)
 
@@ -225,11 +234,12 @@ legend_handles = []
 for c in clusters3:
     col  = CMAP(c.id - 1)
     pole = euler_vector_to_pole(c.euler_vector)
+    _scatter(ax, c.stations, color=col, s=30)
     _quiver(ax, c.stations, color=col)
     _pole_marker(ax, pole, color=col,
                  label=f"E{c.id} ({pole.lat:.0f}°N,{pole.lon:.0f}°E)\n{pole.rate:.2f}°/Myr")
     legend_handles.append(Line2D([0], [0], color=col, lw=0, marker="o",
-                                 markersize=8, markeredgecolor="k", markeredgewidth=0.5,
+                                 markersize=9, markeredgecolor="k", markeredgewidth=0.5,
                                  label=f"Cluster {c.id}  (N={c.size})"))
 
 _ref_arrow(ax)
@@ -261,7 +271,8 @@ for ax, clusters, title in [
 for c in clusters3:
     col = CMAP(c.id - 1)
     # left panel: observed
-    _quiver(axes[0], c.stations, color=col, scale=350)
+    _scatter(axes[0], c.stations, color=col, s=22)
+    _quiver(axes[0], c.stations, color=col, scale=20)
     # right panel: residuals
     lons, lats, dve, dvn = [], [], [], []
     for s in c.stations:
@@ -270,14 +281,15 @@ for c in clusters3:
         lats.append(s.position.lat)
         dve.append(s.velocity.ve - ve_pred)
         dvn.append(s.velocity.vn - vn_pred)
+    _scatter(axes[1], c.stations, color=col, s=22)
     axes[1].quiver(np.array(lons), np.array(lats), np.array(dve), np.array(dvn),
                    transform=ccrs.PlateCarree(),
-                   scale=100, scale_units="xy",
-                   width=0.003, headwidth=4, headlength=5,
-                   color=col, alpha=0.85, zorder=3)
+                   scale=5, scale_units="xy",
+                   width=0.004, headwidth=5, headlength=6,
+                   color=col, alpha=0.9, zorder=3)
 
-_ref_arrow(axes[0], length=20, scale=350)
-_ref_arrow(axes[1], length=5,  scale=100)
+_ref_arrow(axes[0], length=20, scale=20)
+_ref_arrow(axes[1], length=5,  scale=5)
 
 fig.suptitle("Observed vs. residual velocities — Euler-vector clustering k=3",
              fontsize=12)
@@ -299,7 +311,8 @@ for ax, k in zip(axes, [2, 3, 4, 5]):
     for c in clusters_k:
         col  = CMAP(c.id - 1)
         pole = euler_vector_to_pole(c.euler_vector)
-        _quiver(ax, c.stations, color=col, scale=350)
+        _scatter(ax, c.stations, color=col, s=18)
+        _quiver(ax, c.stations, color=col, scale=20)
         _pole_marker(ax, pole, color=col)
 
     _ref_arrow(ax, label=False)
