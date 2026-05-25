@@ -340,34 +340,46 @@ fig, axes = plt.subplots(1, 2, figsize=(16, 7),
 _basemap(axes[0])
 _basemap(axes[1])
 
-all_dve, all_dvn = [], []
+# Left panel: observed velocities (cluster-colored)
+res_lons, res_lats, res_dve, res_dvn = [], [], [], []
+rms_obs_sq = []
 for c in clusters3:
     col = CMAP(c.id - 1)
     _scatter(axes[0], c.stations, color=col, s=22)
-    _quiver(axes[0],  c.stations, color=col, scale=20)
-
-    lons, lats, dve, dvn = [], [], [], []
+    _quiver(axes[0], c.stations, color=col, scale=20)
     for s in c.stations:
         ve_pred, vn_pred = predict_velocity(s, c.euler_vector)
-        dve_i = s.velocity.ve - ve_pred
-        dvn_i = s.velocity.vn - vn_pred
-        lons.append(s.position.lon);  lats.append(s.position.lat)
-        dve.append(dve_i);            dvn.append(dvn_i)
-        all_dve.append(dve_i);        all_dvn.append(dvn_i)
+        res_lons.append(s.position.lon)
+        res_lats.append(s.position.lat)
+        res_dve.append(s.velocity.ve - ve_pred)
+        res_dvn.append(s.velocity.vn - vn_pred)
+        rms_obs_sq.append(s.velocity.ve ** 2 + s.velocity.vn ** 2)
 
-    axes[1].quiver(np.array(lons), np.array(lats),
-                   np.array(dve), np.array(dvn),
-                   transform=ccrs.PlateCarree(),
-                   scale=3, scale_units="xy",
-                   width=0.004, headwidth=5, headlength=6,
-                   color=col, alpha=0.9, zorder=4)
+res_lons = np.array(res_lons)
+res_lats = np.array(res_lats)
+res_dve  = np.array(res_dve)
+res_dvn  = np.array(res_dvn)
 
-rms_obs = np.sqrt(np.mean(
-    [(s.velocity.ve**2 + s.velocity.vn**2) for c in clusters3 for s in c.stations]))
-rms_res = np.sqrt(np.mean(np.array(all_dve)**2 + np.array(all_dvn)**2))
+rms_obs = np.sqrt(np.mean(rms_obs_sq))
+rms_res = np.sqrt(np.mean(res_dve ** 2 + res_dvn ** 2))
+
+# Right panel: residual arrows only — single black, scale_units="width" avoids
+# Mercator-projection unit issues that collapse scale_units="xy" to dots.
+# scale=60 → 60 mm/yr spans full axes width; 5 mm/yr ≈ 8% width → clearly visible.
+q_res = axes[1].quiver(
+    res_lons, res_lats, res_dve, res_dvn,
+    transform=ccrs.PlateCarree(),
+    scale=40, scale_units="width",
+    angles="uv",
+    width=0.004, headwidth=4, headlength=5, headaxislength=4,
+    minlength=0, minshaft=0.5,
+    color="k", alpha=0.85, zorder=4,
+)
+axes[1].quiverkey(q_res, X=0.85, Y=0.06, U=10,
+                  label="10 mm/yr", labelpos="S",
+                  fontproperties={"size": 7})
 
 _ref_arrow(axes[0], length=20, scale=20)
-_ref_arrow(axes[1], length=10, scale=3)
 
 axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
 axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
