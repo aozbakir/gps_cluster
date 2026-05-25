@@ -156,6 +156,18 @@ def _ref_arrow(ax, lon=138.5, lat=31.7, length=20, scale=20, label=True):
                 transform=ccrs.PlateCarree(), fontsize=7, ha="center")
 
 
+def _rms(clusters_list):
+    """RMS velocity residual in mm/yr (unweighted) across all clusters."""
+    sq = []
+    for c in clusters_list:
+        if c.euler_vector is None:
+            continue
+        for s in c.stations:
+            ve_p, vn_p = predict_velocity(s, c.euler_vector)
+            sq.append((s.velocity.ve - ve_p) ** 2 + (s.velocity.vn - vn_p) ** 2)
+    return np.sqrt(np.mean(sq)) if sq else np.nan
+
+
 def _pole_marker(ax, pole, color, label=""):
     in_extent = (EXTENT[0] <= pole.lon <= EXTENT[1] and
                  EXTENT[2] <= pole.lat <= EXTENT[3])
@@ -311,8 +323,10 @@ ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.9)
 chi2_k3 = sum(total_chi_squared(c.stations, c.euler_vector)
               for c in clusters3 if c.euler_vector is not None)
 dof_k3  = 2 * len(stations) - 3 * 3
-ax.set_title(f"Euler-vector clustering  k = 3   χ²_red = {chi2_k3/dof_k3:.0f}\n"
-             "Southwest Japan GPS velocities (ITRF2000)", fontsize=11)
+rms_k3  = _rms(clusters3)
+ax.set_title(f"Euler-vector clustering  k = 3\n"
+             f"RMS = {rms_k3:.1f} mm/yr   χ²_red = {chi2_k3/dof_k3:.0f}",
+             fontsize=11)
 fig.tight_layout()
 fig.savefig(OUT / "fig5_clusters_k3.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
@@ -323,37 +337,46 @@ plt.close(fig)
 print("Plotting Fig 6: residual velocities …")
 fig, axes = plt.subplots(1, 2, figsize=(16, 7),
                          subplot_kw={"projection": ccrs.Mercator()})
+_basemap(axes[0])
+_basemap(axes[1])
 
-for ax, clusters, title in [
-        (axes[0], clusters3, "k = 3  observed"),
-        (axes[1], clusters3, "k = 3  residuals (obs − Euler predicted)")]:
-    _basemap(ax)
-    ax.set_title(title, fontsize=10)
-
+all_dve, all_dvn = [], []
 for c in clusters3:
     col = CMAP(c.id - 1)
-    # left panel: observed
     _scatter(axes[0], c.stations, color=col, s=22)
-    _quiver(axes[0], c.stations, color=col, scale=20)
-    # right panel: residuals
+    _quiver(axes[0],  c.stations, color=col, scale=20)
+
     lons, lats, dve, dvn = [], [], [], []
     for s in c.stations:
         ve_pred, vn_pred = predict_velocity(s, c.euler_vector)
-        lons.append(s.position.lon)
-        lats.append(s.position.lat)
-        dve.append(s.velocity.ve - ve_pred)
-        dvn.append(s.velocity.vn - vn_pred)
-    _scatter(axes[1], c.stations, color=col, s=22)
-    axes[1].quiver(np.array(lons), np.array(lats), np.array(dve), np.array(dvn),
+        dve_i = s.velocity.ve - ve_pred
+        dvn_i = s.velocity.vn - vn_pred
+        lons.append(s.position.lon);  lats.append(s.position.lat)
+        dve.append(dve_i);            dvn.append(dvn_i)
+        all_dve.append(dve_i);        all_dvn.append(dvn_i)
+
+    # Right panel: neutral grey dots so residual arrows are the focus
+    axes[1].scatter(np.array(lons), np.array(lats),
+                    s=22, color="lightgrey", edgecolor="grey",
+                    linewidths=0.3, transform=ccrs.PlateCarree(), zorder=3)
+    axes[1].quiver(np.array(lons), np.array(lats),
+                   np.array(dve), np.array(dvn),
                    transform=ccrs.PlateCarree(),
                    scale=5, scale_units="xy",
                    width=0.004, headwidth=5, headlength=6,
-                   color=col, alpha=0.9, zorder=3)
+                   color=col, alpha=0.9, zorder=4)
+
+rms_obs = np.sqrt(np.mean(
+    [(s.velocity.ve**2 + s.velocity.vn**2) for c in clusters3 for s in c.stations]))
+rms_res = np.sqrt(np.mean(np.array(all_dve)**2 + np.array(all_dvn)**2))
 
 _ref_arrow(axes[0], length=20, scale=20)
 _ref_arrow(axes[1], length=5,  scale=5)
 
-fig.suptitle("Observed vs. residual velocities — Euler-vector clustering k=3",
+axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
+axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
+
+fig.suptitle("Euler-vector clustering k = 3 — southwest Japan GPS (ITRF2000)",
              fontsize=12)
 fig.tight_layout()
 fig.savefig(OUT / "fig6_residuals_k3.png", dpi=180, bbox_inches="tight")
@@ -380,8 +403,9 @@ for ax, k in zip(axes, [2, 3, 4, 5]):
 
     _ref_arrow(ax, label=False)
 
+    rms_k = _rms(clusters_k)
     chi2r = ftest.chi2_reduced[k - 1]
-    ax.set_title(f"k = {k}   χ²_red = {chi2r:.1f}", fontsize=11)
+    ax.set_title(f"k = {k}   RMS = {rms_k:.1f} mm/yr   χ²_red = {chi2r:.0f}", fontsize=10)
 
 fig.suptitle("Euler-vector clustering — southwest Japan GPS (ITRF2000)\n"
              "★ = Euler pole (if inside map region)", fontsize=12)
