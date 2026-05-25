@@ -355,14 +355,10 @@ for c in clusters3:
         dve.append(dve_i);            dvn.append(dvn_i)
         all_dve.append(dve_i);        all_dvn.append(dvn_i)
 
-    # Right panel: neutral grey dots so residual arrows are the focus
-    axes[1].scatter(np.array(lons), np.array(lats),
-                    s=22, color="lightgrey", edgecolor="grey",
-                    linewidths=0.3, transform=ccrs.PlateCarree(), zorder=3)
     axes[1].quiver(np.array(lons), np.array(lats),
                    np.array(dve), np.array(dvn),
                    transform=ccrs.PlateCarree(),
-                   scale=5, scale_units="xy",
+                   scale=3, scale_units="xy",
                    width=0.004, headwidth=5, headlength=6,
                    color=col, alpha=0.9, zorder=4)
 
@@ -371,7 +367,7 @@ rms_obs = np.sqrt(np.mean(
 rms_res = np.sqrt(np.mean(np.array(all_dve)**2 + np.array(all_dvn)**2))
 
 _ref_arrow(axes[0], length=20, scale=20)
-_ref_arrow(axes[1], length=5,  scale=5)
+_ref_arrow(axes[1], length=10, scale=3)
 
 axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
 axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
