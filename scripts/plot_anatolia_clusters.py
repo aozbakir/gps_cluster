@@ -27,6 +27,7 @@ import matplotlib.ticker as mticker
 import numpy as np
 from matplotlib.lines import Line2D
 from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial import ConvexHull
 
 from gps_cluster.application.euler_clustering import EulerVectorClustering
 from gps_cluster.application.preprocess import preprocess
@@ -135,6 +136,23 @@ def _pole_marker(ax, pole, color, label=""):
         ax.text(pole.lon + 0.15, pole.lat + 0.1, label,
                 transform=ccrs.PlateCarree(), fontsize=7,
                 color=color, fontweight="bold", zorder=7)
+
+
+def _cluster_hull(ax, cluster_stations, color, alpha=0.18):
+    """Draw convex hull of cluster station positions as a shaded polygon."""
+    if len(cluster_stations) < 3:
+        return
+    pts = np.array([[s.position.lon, s.position.lat] for s in cluster_stations])
+    try:
+        hull = ConvexHull(pts)
+    except Exception:
+        return
+    hull_pts = pts[hull.vertices]
+    poly = plt.Polygon(hull_pts, closed=True,
+                       transform=ccrs.PlateCarree(),
+                       facecolor=color, alpha=alpha,
+                       edgecolor=color, linewidth=1.5, zorder=2)
+    ax.add_patch(poly)
 
 
 def _rms(clusters_list):
@@ -309,44 +327,39 @@ _basemap(axes[0])
 _basemap(axes[1])
 
 res_lons, res_lats, res_dve, res_dvn = [], [], [], []
-rms_obs_sq = []
 for c in clusters_best:
     if c.euler_vector is None:
         continue
     col = CMAP(c.id - 1)
+    _cluster_hull(axes[0], c.stations, color=col)
     _scatter(axes[0], c.stations, color=col, s=18)
-    _quiver(axes[0], c.stations, color=col)
     for s in c.stations:
         ve_p, vn_p = predict_velocity(s, c.euler_vector)
         res_lons.append(s.position.lon)
         res_lats.append(s.position.lat)
         res_dve.append(s.velocity.ve - ve_p)
         res_dvn.append(s.velocity.vn - vn_p)
-        rms_obs_sq.append(s.velocity.ve ** 2 + s.velocity.vn ** 2)
 
 res_lons = np.array(res_lons)
 res_lats = np.array(res_lats)
 res_dve  = np.array(res_dve)
 res_dvn  = np.array(res_dvn)
-rms_obs  = np.sqrt(np.mean(rms_obs_sq))
 rms_res  = np.sqrt(np.mean(res_dve ** 2 + res_dvn ** 2))
 
 q_res = axes[1].quiver(
     res_lons, res_lats, res_dve, res_dvn,
     transform=ccrs.PlateCarree(),
-    scale=40, scale_units="width",
+    scale=80, scale_units="width",
     angles="uv",
     width=0.004, headwidth=4, headlength=5, headaxislength=4,
     minlength=0, minshaft=0.5,
     color="k", alpha=0.85, zorder=4,
 )
-axes[1].quiverkey(q_res, X=0.85, Y=0.06, U=10,
-                  label="10 mm/yr", labelpos="S",
+axes[1].quiverkey(q_res, X=0.85, Y=0.06, U=5,
+                  label="5 mm/yr", labelpos="S",
                   fontproperties={"size": 7})
 
-_ref_arrow(axes[0], length=20)
-
-axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
+axes[0].set_title(f"Cluster assignment  (k = {k_gap})", fontsize=10)
 axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
 fig.suptitle(f"Euler-vector clustering k = {k_gap} — Anatolia GPS (ITRF14)",
              fontsize=12)
