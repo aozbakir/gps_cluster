@@ -162,11 +162,13 @@ def _scatter(ax, stations_list, color, s=28):
 def _ref_arrow(ax, length=20, scale=200, label=True):
     """Add a black reference scale bar via quiverkey.
 
-    Creates a hidden quiver outside the SW Japan map extent (Indian Ocean,
-    0°N/0°E) so it is clipped and not visible, then draws the reference key
-    with quiverkey.  scale must match the _quiver scale used on this axes.
+    The anchor quiver must be placed WITHIN the SW Japan map extent so that
+    bbox_inches="tight" does not expand the canvas to include it.  It is drawn
+    at zorder=-1 (below the ocean/land features at zorder=0) so it is not
+    visible on the map.  Quiverkey then draws the visible reference bar at
+    axes-fraction position (0.85, 0.06).
     """
-    _q = ax.quiver(np.array([0.0]), np.array([0.0]),
+    _q = ax.quiver(np.array([134.0]), np.array([34.5]),   # Honshu interior
                    np.array([float(length)]), np.array([0.0]),
                    transform=ccrs.PlateCarree(),
                    scale=scale, scale_units="width",
@@ -192,12 +194,18 @@ def _rms(clusters_list):
 
 
 def _pole_marker(ax, pole, color, label=""):
+    """Draw Euler pole symbol only when the pole falls inside the map extent.
+
+    Poles outside the extent are skipped entirely: ax.scatter / ax.text at
+    remote coordinates (e.g. South America) are included in the
+    bbox_inches='tight' bounding box and expand the canvas by 10–100×.
+    """
     in_extent = (EXTENT[0] <= pole.lon <= EXTENT[1] and
                  EXTENT[2] <= pole.lat <= EXTENT[3])
-    marker = "*" if in_extent else "D"
-    size   = 200 if in_extent else 80
+    if not in_extent:
+        return   # caller should put pole info in the legend label instead
     ax.scatter(pole.lon, pole.lat,
-               marker=marker, s=size, color=color,
+               marker="*", s=200, color=color,
                edgecolor="k", linewidth=0.8,
                transform=ccrs.PlateCarree(), zorder=6)
     if label:
@@ -330,18 +338,18 @@ for c in clusters3:
     pole = euler_vector_to_pole(c.euler_vector)
     _scatter(ax, c.stations, color=col, s=30)
     _quiver(ax, c.stations, color=col)
+    # _pole_marker silently skips poles outside the map extent (drawing them
+    # at their real coordinates expands the canvas by 10-100x via bbox_inches).
     _pole_marker(ax, pole, color=col,
-                 label=f"E{c.id} ({pole.lat:.0f}°N,{pole.lon:.0f}°E)\n{pole.rate:.2f}°/Myr")
+                 label=f"E{c.id} ({pole.lat:.0f}°N,{pole.lon:.0f}°E) {pole.rate:.2f}°/Myr")
+    # Put the pole location in the legend so it isn't lost when off-map
+    in_ext = EXTENT[0] <= pole.lon <= EXTENT[1] and EXTENT[2] <= pole.lat <= EXTENT[3]
+    pole_str = f"  pole {pole.lat:.0f}°N {pole.lon:.0f}°E" if not in_ext else ""
     legend_handles.append(Line2D([0], [0], color=col, lw=0, marker="o",
                                  markersize=9, markeredgecolor="k", markeredgewidth=0.5,
-                                 label=f"Cluster {c.id}  (N={c.size})"))
+                                 label=f"Cluster {c.id}  (N={c.size}){pole_str}"))
 
 _ref_arrow(ax)
-
-# Euler pole legend entry
-legend_handles.append(Line2D([0], [0], lw=0, marker="*",
-                              markersize=11, markeredgecolor="k", markeredgewidth=0.5,
-                              color="gray", label="Euler pole (if in region)"))
 ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.9)
 chi2_k3 = sum(total_chi_squared(c.stations, c.euler_vector)
               for c in clusters3 if c.euler_vector is not None)
