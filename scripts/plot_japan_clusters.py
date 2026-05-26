@@ -320,7 +320,7 @@ print("Plotting Fig 5: k=3 cluster map …")
 clusters3 = evc.cluster(stations, k=3,
                          init_labels=_geo_init_labels(stations, 3))
 
-fig, ax = plt.subplots(figsize=(11, 8),
+fig, ax = plt.subplots(figsize=(14, 10),
                        subplot_kw={"projection": ccrs.Mercator()})
 _basemap(ax)
 
@@ -350,7 +350,9 @@ rms_k3  = _rms(clusters3)
 ax.set_title(f"Euler-vector clustering  k = 3\n"
              f"RMS = {rms_k3:.1f} mm/yr   χ²_red = {chi2_k3/dof_k3:.0f}",
              fontsize=11)
-fig.tight_layout()
+# No tight_layout() — it squeezes Cartopy GeoAxes inward to accommodate
+# gridline tick labels, leaving large blank margins.  bbox_inches="tight"
+# in savefig alone crops correctly.
 fig.savefig(OUT / "fig5_clusters_k3.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
 
