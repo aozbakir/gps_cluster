@@ -138,8 +138,8 @@ def _pole_marker(ax, pole, color, label=""):
                 color=color, fontweight="bold", zorder=7)
 
 
-def _cluster_hull(ax, cluster_stations, color, alpha=0.18):
-    """Draw convex hull of cluster station positions as a shaded polygon."""
+def _cluster_hull(ax, cluster_stations, color):
+    """Draw convex hull of cluster station positions as a thick dashed outline."""
     if len(cluster_stations) < 3:
         return
     pts = np.array([[s.position.lon, s.position.lat] for s in cluster_stations])
@@ -148,11 +148,11 @@ def _cluster_hull(ax, cluster_stations, color, alpha=0.18):
     except Exception:
         return
     hull_pts = pts[hull.vertices]
-    poly = plt.Polygon(hull_pts, closed=True,
-                       transform=ccrs.PlateCarree(),
-                       facecolor=color, alpha=alpha,
-                       edgecolor=color, linewidth=1.5, zorder=2)
-    ax.add_patch(poly)
+    closed = np.vstack([hull_pts, hull_pts[0]])
+    ax.plot(closed[:, 0], closed[:, 1],
+            transform=ccrs.PlateCarree(),
+            color=color, linewidth=2.2, linestyle="--",
+            alpha=0.85, zorder=3)
 
 
 def _rms(clusters_list):
