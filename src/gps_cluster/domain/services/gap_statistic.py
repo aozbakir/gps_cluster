@@ -30,6 +30,13 @@ class GapResult:
                 return int(self.k_values[i])
         return int(self.k_values[-1])
 
+    @property
+    def k_max_gap(self) -> int:
+        """k that maximises Gap(k) — appropriate when the first-crossing rule
+        trivially selects k=1 (e.g. strong-gradient datasets where Gap(1) is
+        already large relative to Gap(2)-s_2)."""
+        return int(self.k_values[np.argmax(self.gap)])
+
 
 def _within_dispersion(data: np.ndarray, labels: np.ndarray) -> float:
     """Pooled within-cluster sum of squared distances: Wk = sum_r D_r / (2 n_r)."""

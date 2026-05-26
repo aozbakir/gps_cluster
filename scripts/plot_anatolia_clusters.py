@@ -187,7 +187,8 @@ plt.close(fig)
 print("Plotting Fig 3: HAC dendrogram + gap statistic …")
 hac      = VelocityHACClustering()
 Z        = hac.fit(stations)
-k_gap, gap_result = hac.find_optimal_k(stations, max_k=7, n_ref=30)
+_, gap_result = hac.find_optimal_k(stations, max_k=7, n_ref=30)
+k_gap = gap_result.k_max_gap   # max-Gap criterion; first-crossing trivially picks k=1 here
 print(f"  Gap optimal k = {k_gap}")
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
@@ -201,10 +202,10 @@ ks = gap_result.k_values
 ax2.errorbar(ks, gap_result.gap, yerr=gap_result.sk,
              fmt="-o", capsize=4, linewidth=1.8,
              markerfacecolor="white", color="steelblue", label="Gap(k) ± s_k")
-ax2.axvline(k_gap, color="tomato", ls="--", lw=1.5, label=f"Optimal k = {k_gap}")
+ax2.axvline(k_gap, color="tomato", ls="--", lw=1.5, label=f"Max-gap k = {k_gap}")
 ax2.set_xlabel("Number of clusters k", fontsize=11)
 ax2.set_ylabel("Gap statistic", fontsize=11)
-ax2.set_title("Tibshirani (2001) gap statistic", fontsize=11)
+ax2.set_title("Gap statistic — max-gap criterion", fontsize=11)
 ax2.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 ax2.legend(fontsize=9)
 fig.suptitle("Velocity-space HAC — Anatolia GPS", fontsize=12)
@@ -213,32 +214,49 @@ fig.savefig(OUT / "fig3_hac_gap.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Figure 4 — Euler chi² vs k (elbow / F-test)
+# Figure 4 — Euler chi²_red vs k  +  marginal improvement (Δchi²_red)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 4: Euler chi² vs k …")
 evc = EulerVectorClustering(init="multiscale", n_restarts=20, random_seed=0)
-k_euler, ftest = evc.find_optimal_k(stations, max_k=7)
-print(f"  F-test optimal k = {k_euler}")
+_, ftest = evc.find_optimal_k(stations, max_k=7)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-ks = ftest.k_values
-ax1.plot(ks, ftest.chi2_reduced, "-o", lw=2,
-         markerfacecolor="white", color="steelblue")
+ks = ftest.k_values  # [1, 2, ..., 7]
+
+# Left: chi²_red on log scale.  Log scale reveals the elbow region (k=4-6)
+# that is compressed when large k=1 value dominates a linear axis.
+ax1.semilogy(ks, ftest.chi2_reduced, "-o", lw=2,
+             markerfacecolor="white", color="steelblue")
 ax1.axhline(1, color="gray", ls="--", lw=1, label="χ²_red = 1")
+ax1.axvline(k_gap, color="tomato", ls="--", lw=1.5,
+            label=f"Gap statistic k = {k_gap}")
 ax1.set_xlabel("Number of clusters k", fontsize=11)
-ax1.set_ylabel("Reduced χ²", fontsize=11)
+ax1.set_ylabel("Reduced χ²  (log scale)", fontsize=11)
 ax1.set_title("Euler-vector clustering — fit quality", fontsize=11)
 ax1.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 ax1.legend(fontsize=9)
 
-ax2.plot(ks[1:], ftest.p_values, "-o", lw=2,
-         markerfacecolor="white", color="tomato")
-ax2.axhline(0.05, color="gray", ls="--", lw=1, label="α = 0.05")
+# Right: marginal improvement Δchi²_red = chi²_red(k-1) − chi²_red(k).
+# RMS always decreases with k (guaranteed); chi²_red accounts for the
+# extra 3 parameters per cluster.  The sharp drop after k=k_gap shows
+# where additional clusters stop buying meaningful fit improvement.
+# F-test p-values are useless here: with N=836 stations all p ≈ 0
+# regardless of k, so the panel is flat and contains no information.
+improvement = -np.diff(ftest.chi2_reduced)   # positive: chi2_red(k-1) - chi2_red(k)
+k_bars      = np.array(ks[1:])               # k = 2..7
+
+ax2.bar(k_bars, improvement, color="steelblue", alpha=0.8,
+        edgecolor="k", linewidth=0.5)
+ax2.set_yscale("log")
+ax2.axvline(k_gap, color="tomato", ls="--", lw=1.5,
+            label=f"Gap statistic k = {k_gap}")
 ax2.set_xlabel("Number of clusters k", fontsize=11)
-ax2.set_ylabel("F-test p-value  (k vs k+1)", fontsize=11)
-ax2.set_title("Significance of adding one more cluster", fontsize=11)
+ax2.set_ylabel("Δχ²_red  (log scale)", fontsize=11)
+ax2.set_title("Marginal improvement per added cluster\n"
+              "Elbow = natural cluster number", fontsize=11)
 ax2.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 ax2.legend(fontsize=9)
+
 fig.suptitle("Euler-vector clustering — Anatolia GPS (ITRF14)", fontsize=12)
 fig.tight_layout()
 fig.savefig(OUT / "fig4_euler_chi2.png", dpi=180, bbox_inches="tight")
@@ -247,8 +265,8 @@ plt.close(fig)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Figure 5 — Map: best-k clusters + velocity arrows
 # ═══════════════════════════════════════════════════════════════════════════════
-print(f"Plotting Fig 5: k={k_euler} cluster map …")
-clusters_best = evc.cluster(stations, k=k_euler)
+print(f"Plotting Fig 5: k={k_gap} cluster map (gap statistic) …")
+clusters_best = evc.cluster(stations, k=k_gap)
 
 fig, ax = plt.subplots(figsize=(16, 9),
                        subplot_kw={"projection": ccrs.Mercator()})
@@ -273,9 +291,9 @@ ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.9)
 
 chi2_best = sum(total_chi_squared(c.stations, c.euler_vector)
                 for c in clusters_best if c.euler_vector is not None)
-dof_best  = 2 * len(stations) - 3 * k_euler
+dof_best  = 2 * len(stations) - 3 * k_gap
 rms_best  = _rms(clusters_best)
-ax.set_title(f"Euler-vector clustering  k = {k_euler}\n"
+ax.set_title(f"Euler-vector clustering  k = {k_gap}  (gap statistic)\n"
              f"RMS = {rms_best:.1f} mm/yr   χ²_red = {chi2_best/dof_best:.0f}",
              fontsize=12)
 fig.savefig(OUT / "fig5_clusters_best_k.png", dpi=180, bbox_inches="tight")
@@ -330,7 +348,7 @@ _ref_arrow(axes[0], length=20)
 
 axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
 axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
-fig.suptitle(f"Euler-vector clustering k = {k_euler} — Anatolia GPS (ITRF14)",
+fig.suptitle(f"Euler-vector clustering k = {k_gap} — Anatolia GPS (ITRF14)",
              fontsize=12)
 fig.savefig(OUT / "fig6_residuals.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
