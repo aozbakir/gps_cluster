@@ -113,11 +113,26 @@ def predict_velocity(station: GpsStation, euler: EulerVector) -> tuple[float, fl
 
 
 def weighted_residual_sq(station: GpsStation, euler: EulerVector) -> float:
-    """Weighted squared velocity residual: ((Ve_pred-Ve)/Se)^2 + ((Vn_pred-Vn)/Sn)^2."""
+    """Weighted squared velocity residual: ((Ve_pred-Ve)/Se)^2 + ((Vn_pred-Vn)/Sn)^2.
+
+    Kept for reference / chi² bookkeeping; NOT used in Savage (2018) reassignment.
+    """
     ve_pred, vn_pred = predict_velocity(station, euler)
     re = (ve_pred - station.velocity.ve) / station.velocity.se
     rn = (vn_pred - station.velocity.vn) / station.velocity.sn
     return re**2 + rn**2
+
+
+def unweighted_residual_sq(station: GpsStation, euler: EulerVector) -> float:
+    """Unweighted squared velocity residual: (Ve_pred-Ve)^2 + (Vn_pred-Vn)^2  [mm²/yr²].
+
+    This is the reassignment criterion used by Savage (2018) — minimise the
+    Euclidean distance in velocity space, ignoring measurement uncertainties.
+    """
+    ve_pred, vn_pred = predict_velocity(station, euler)
+    dve = ve_pred - station.velocity.ve
+    dvn = vn_pred - station.velocity.vn
+    return dve * dve + dvn * dvn
 
 
 def total_chi_squared(stations: list[GpsStation], euler: EulerVector) -> float:

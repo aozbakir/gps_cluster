@@ -101,6 +101,13 @@ def _geo_init_labels(stations_list, k):
     labels = -labels
     return labels
 
+# ── Earth radius for ω-space conversion ─────────────────────────────────────
+_R_MM = 6_371_000.0 * 1_000.0  # mm
+
+def _omega_deg_per_ma(euler_vec) -> np.ndarray:
+    """Convert EulerVector (mm/yr) → Cartesian (ωx, ωy, ωz) in °/Ma."""
+    return euler_vec.to_array() / _R_MM * np.degrees(1) * 1e6
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _basemap(ax, extent=EXTENT):
@@ -391,34 +398,60 @@ fig.savefig(OUT / "fig6_residuals_k3.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Figure 7 — 2×2 grid: k = 2, 3, 4, 5
+# Figure 7 — 4×2 grid: k = 2..9  (dots only, matching Savage 2018 Fig 2)
 # ═══════════════════════════════════════════════════════════════════════════════
-print("Plotting Fig 7: k = 2–5 comparison …")
-fig, axes = plt.subplots(2, 2, figsize=(16, 12),
+print("Plotting Fig 7: k = 2–9 cluster maps …")
+all_clusters_k = {}   # cache for ω-space plot
+fig, axes = plt.subplots(4, 2, figsize=(14, 22),
                          subplot_kw={"projection": ccrs.Mercator()})
 axes = axes.flatten()
 
-for ax, k in zip(axes, [2, 3, 4, 5]):
+for ax, k in zip(axes, range(2, 10)):
     _basemap(ax)
     clusters_k = evc.cluster(stations, k=k,
                               init_labels=_geo_init_labels(stations, k))
+    all_clusters_k[k] = clusters_k
     for c in clusters_k:
-        col  = CMAP(c.id - 1)
-        pole = euler_vector_to_pole(c.euler_vector)
-        _scatter(ax, c.stations, color=col, s=18)
-        _quiver(ax, c.stations, color=col, scale=20)
-        _pole_marker(ax, pole, color=col)
-
-    _ref_arrow(ax, label=False)
+        col = CMAP(c.id - 1)
+        _scatter(ax, c.stations, color=col, s=12)
 
     rms_k = _rms(clusters_k)
-    chi2r = ftest.chi2_reduced[k - 1]
-    ax.set_title(f"k = {k}   RMS = {rms_k:.1f} mm/yr   χ²_red = {chi2r:.0f}", fontsize=10)
+    ax.set_title(f"k = {k}   rms = {rms_k:.2f} mm/yr", fontsize=10)
 
 fig.suptitle("Euler-vector clustering — southwest Japan GPS (ITRF2000)\n"
-             "★ = Euler pole (if inside map region)", fontsize=12)
+             "Coloured dots = cluster assignment  (cf. Savage 2018 Fig 2)", fontsize=11)
 fig.tight_layout()
-fig.savefig(OUT / "fig7_k2345_comparison.png", dpi=180, bbox_inches="tight")
+fig.savefig(OUT / "fig7_k2to9_clusters.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Figure 8 — ω-space scatter (Euler vectors in Cartesian °/Ma, k = 2..9)
+#            Equivalent to Savage (2018) Figs 3 & 4
+# ═══════════════════════════════════════════════════════════════════════════════
+print("Plotting Fig 8: ω-space Euler vectors …")
+fig, axes8 = plt.subplots(4, 2, figsize=(12, 20),
+                           subplot_kw={"projection": "3d"})
+axes8 = axes8.flatten()
+
+for ax, k in zip(axes8, range(2, 10)):
+    clusters_k = all_clusters_k[k]
+    for c in clusters_k:
+        if c.euler_vector is None:
+            continue
+        col = CMAP(c.id - 1)
+        wx, wy, wz = _omega_deg_per_ma(c.euler_vector)
+        ax.scatter(wx, wy, wz, color=col, s=80, edgecolors="k", linewidths=0.5, zorder=5)
+
+    ax.set_xlabel("ωx  (°/Ma)", fontsize=7, labelpad=2)
+    ax.set_ylabel("ωy  (°/Ma)", fontsize=7, labelpad=2)
+    ax.set_zlabel("ωz  (°/Ma)", fontsize=7, labelpad=2)
+    ax.tick_params(labelsize=6)
+    ax.set_title(f"k = {k}", fontsize=9)
+
+fig.suptitle("Euler vectors in ω-space  (°/Ma, ITRF2000)\n"
+             "cf. Savage (2018) Figs 3 & 4", fontsize=11)
+fig.tight_layout()
+fig.savefig(OUT / "fig8_omega_space.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 
 print(f"\nAll figures saved to {OUT}/")

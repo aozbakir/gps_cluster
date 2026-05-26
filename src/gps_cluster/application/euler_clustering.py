@@ -44,7 +44,8 @@ from gps_cluster.domain.entities import EulerVector, GpsStation, VelocityCluster
 from gps_cluster.domain.services.euler_math import (
     invert_euler_vector,
     total_chi_squared,
-    weighted_residual_sq,
+    unweighted_residual_sq,
+    weighted_residual_sq,  # kept for chi² bookkeeping; not used in Savage reassignment
 )
 
 _MIN_STATIONS_PER_CLUSTER = 2  # minimum for a determined Euler inversion
@@ -78,8 +79,14 @@ class EulerVectorClustering:
         chi²; more expensive but more robust.
     n_restarts:
         Number of additional random restarts used when ``init="multiscale"``.
+        Savage (2018) uses 3,000; default here is 100 for practical run-time.
     random_seed:
         Seed for random restarts.
+    weighted_reassign:
+        If True, reassign stations using the chi² criterion
+        ``(dVe/se)²+(dVn/sn)²`` (weighted by measurement uncertainties).
+        If False (default), use the unweighted Euclidean criterion
+        ``dVe²+dVn²``, matching Savage (2018).
     """
 
     def __init__(
@@ -87,14 +94,16 @@ class EulerVectorClustering:
         max_iter: int = 100,
         min_stations: int = _MIN_STATIONS_PER_CLUSTER,
         init: str = "velocity",
-        n_restarts: int = 20,
+        n_restarts: int = 100,
         random_seed: int = 0,
+        weighted_reassign: bool = False,
     ) -> None:
         self.max_iter = max_iter
         self.min_stations = min_stations
         self.init = init
         self.n_restarts = n_restarts
         self.random_seed = random_seed
+        self.weighted_reassign = weighted_reassign
 
     # ------------------------------------------------------------------
     # Public API
@@ -272,11 +281,18 @@ class EulerVectorClustering:
         stations: list[GpsStation],
         euler_map: dict[int, EulerVector],
     ) -> np.ndarray:
-        """Assign each station to the cluster with the smallest weighted residual."""
+        """Assign each station to the cluster with the smallest velocity residual.
+
+        Default (weighted_reassign=False): unweighted Euclidean distance in
+        velocity space — sqrt(dVe²+dVn²) — matching Savage (2018).
+        weighted_reassign=True uses the chi² criterion ((dVe/se)²+(dVn/sn)²),
+        kept for reference and comparison.
+        """
         cluster_ids = sorted(euler_map)
         new_labels = np.zeros(len(stations), dtype=int)
+        resid_fn = weighted_residual_sq if self.weighted_reassign else unweighted_residual_sq
         for i, s in enumerate(stations):
-            residuals = {cid: weighted_residual_sq(s, euler_map[cid]) for cid in cluster_ids}
+            residuals = {cid: resid_fn(s, euler_map[cid]) for cid in cluster_ids}
             new_labels[i] = min(residuals, key=residuals.get)
         return new_labels
 

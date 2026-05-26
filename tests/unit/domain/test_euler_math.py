@@ -13,6 +13,7 @@ from gps_cluster.domain.services.euler_math import (
     euler_vector_to_pole,
     invert_euler_vector,
     predict_velocity,
+    unweighted_residual_sq,
     weighted_residual_sq,
 )
 
@@ -122,6 +123,36 @@ class TestInvertEulerVector:
         recovered = invert_euler_vector(stations)
         for s in stations:
             assert weighted_residual_sq(s, recovered) == pytest.approx(0.0, abs=1e-8)
+
+
+class TestUnweightedResidualSq:
+    def test_zero_for_exact_prediction(self):
+        """Exact prediction → zero unweighted residual."""
+        from gps_cluster.domain.entities import EulerPole
+        true_euler = euler_pole_to_vector(EulerPole(lat=30.0, lon=-100.0, rate=1.5))
+        s_dummy = GpsStation("x", Position(-105.0, 33.0), Velocity(0, 0, 0, 1, 1, 1))
+        ve, vn = predict_velocity(s_dummy, true_euler)
+        s = GpsStation("x", Position(-105.0, 33.0), Velocity(ve, vn, 0, 1, 1, 1))
+        assert unweighted_residual_sq(s, true_euler) == pytest.approx(0.0, abs=1e-10)
+
+    def test_differs_from_weighted_when_sigma_ne_1(self):
+        """When se != sn != 1, weighted and unweighted residuals must differ."""
+        s = GpsStation("x", Position(10.0, 35.0),
+                        Velocity(ve=5.0, vn=3.0, vu=0.0, se=0.5, sn=2.0, su=1.0))
+        euler = EulerVector(1.0, -0.5, 2.0)
+        w = weighted_residual_sq(s, euler)
+        u = unweighted_residual_sq(s, euler)
+        assert w != pytest.approx(u, rel=1e-3)
+
+    def test_independent_of_sigma(self):
+        """Unweighted residual must not change when only sigmas are scaled."""
+        s1 = GpsStation("x", Position(10.0, 35.0),
+                         Velocity(ve=5.0, vn=3.0, vu=0.0, se=1.0, sn=1.0, su=1.0))
+        s2 = GpsStation("x", Position(10.0, 35.0),
+                         Velocity(ve=5.0, vn=3.0, vu=0.0, se=0.1, sn=5.0, su=1.0))
+        euler = EulerVector(1.0, -0.5, 2.0)
+        assert unweighted_residual_sq(s1, euler) == pytest.approx(
+            unweighted_residual_sq(s2, euler), rel=1e-10)
 
 
 class TestEulerPoleConversions:
