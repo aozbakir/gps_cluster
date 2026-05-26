@@ -128,16 +128,24 @@ def _basemap(ax, extent=EXTENT):
     return ax
 
 
-def _quiver(ax, stations_list, color, scale=20, **kw):
-    """scale=20 → 20 mm/yr arrow = 1° long on the map."""
+def _quiver(ax, stations_list, color, scale=200, **kw):
+    """GPS velocity arrows.
+
+    scale_units='width' avoids the Mercator-projection unit issue where
+    scale_units='xy' resolves to projected meters and collapses mm/yr-scale
+    vectors to matplotlib's minlength=1 filled-polygon substitute (circles).
+    scale=200 → 200 mm/yr spans full axes width → 20 mm/yr ≈ 10% of width.
+    """
     lons = np.array([s.position.lon for s in stations_list])
     lats = np.array([s.position.lat for s in stations_list])
     ve   = np.array([s.velocity.ve  for s in stations_list])
     vn   = np.array([s.velocity.vn  for s in stations_list])
     q = ax.quiver(lons, lats, ve, vn,
                   transform=ccrs.PlateCarree(),
-                  scale=scale, scale_units="xy",
-                  width=0.004, headwidth=5, headlength=6,
+                  scale=scale, scale_units="width",
+                  angles="uv",
+                  width=0.003, headwidth=4, headlength=5, headaxislength=4,
+                  minlength=0, minshaft=0.5,
                   color=color, alpha=0.9, zorder=3, **kw)
     return q
 
@@ -151,16 +159,24 @@ def _scatter(ax, stations_list, color, s=28):
                transform=ccrs.PlateCarree(), zorder=4)
 
 
-def _ref_arrow(ax, lon=138.5, lat=31.7, length=20, scale=20, label=True):
-    """Draw a reference scale arrow (all args wrapped as arrays for cartopy)."""
-    ax.quiver(np.array([lon]), np.array([lat]),
-              np.array([float(length)]), np.array([0.0]),
-              transform=ccrs.PlateCarree(),
-              scale=scale, scale_units="xy",
-              width=0.003, headwidth=4, headlength=5, color="k", zorder=5)
+def _ref_arrow(ax, length=20, scale=200, label=True):
+    """Add a black reference scale bar via quiverkey.
+
+    Creates a hidden quiver outside the SW Japan map extent (Indian Ocean,
+    0°N/0°E) so it is clipped and not visible, then draws the reference key
+    with quiverkey.  scale must match the _quiver scale used on this axes.
+    """
+    _q = ax.quiver(np.array([0.0]), np.array([0.0]),
+                   np.array([float(length)]), np.array([0.0]),
+                   transform=ccrs.PlateCarree(),
+                   scale=scale, scale_units="width",
+                   angles="uv",
+                   width=0.003, headwidth=4, headlength=5,
+                   color="k", zorder=-1)
     if label:
-        ax.text(lon + length / scale / 2, lat - 0.25, f"{length} mm/yr",
-                transform=ccrs.PlateCarree(), fontsize=7, ha="center")
+        ax.quiverkey(_q, X=0.85, Y=0.06, U=length,
+                     label=f"{length} mm/yr", labelpos="S",
+                     fontproperties={"size": 7})
 
 
 def _rms(clusters_list):
@@ -353,7 +369,7 @@ rms_obs_sq = []
 for c in clusters3:
     col = CMAP(c.id - 1)
     _scatter(axes[0], c.stations, color=col, s=22)
-    _quiver(axes[0], c.stations, color=col, scale=20)
+    _quiver(axes[0], c.stations, color=col)
     for s in c.stations:
         ve_pred, vn_pred = predict_velocity(s, c.euler_vector)
         res_lons.append(s.position.lon)
@@ -386,7 +402,7 @@ axes[1].quiverkey(q_res, X=0.85, Y=0.06, U=10,
                   label="10 mm/yr", labelpos="S",
                   fontproperties={"size": 7})
 
-_ref_arrow(axes[0], length=20, scale=20)
+_ref_arrow(axes[0], length=20)
 
 axes[0].set_title(f"Observed velocities  (RMS = {rms_obs:.1f} mm/yr)", fontsize=10)
 axes[1].set_title(f"Obs − Euler predicted  (RMS misfit = {rms_res:.1f} mm/yr)", fontsize=10)
@@ -408,8 +424,13 @@ axes = axes.flatten()
 
 for ax, k in zip(axes, range(2, 10)):
     _basemap(ax)
-    clusters_k = evc.cluster(stations, k=k,
-                              init_labels=_geo_init_labels(stations, k))
+    # Pure multiscale init — no a priori geographic labels injected.
+    # Savage (2018) used sequential equal-size alphabetical splits + 3,000
+    # restarts; we use HAC-seeded multiscale + 100 restarts.  For k = 3 the
+    # interseismic-loading signal causes the RMS-optimal solution to be
+    # iso-velocity bands rather than tectonic plates without the geographic
+    # prior used in Fig 5.
+    clusters_k = evc.cluster(stations, k=k)
     all_clusters_k[k] = clusters_k
     for c in clusters_k:
         col = CMAP(c.id - 1)
@@ -419,7 +440,8 @@ for ax, k in zip(axes, range(2, 10)):
     ax.set_title(f"k = {k}   rms = {rms_k:.2f} mm/yr", fontsize=10)
 
 fig.suptitle("Euler-vector clustering — southwest Japan GPS (ITRF2000)\n"
-             "Coloured dots = cluster assignment  (cf. Savage 2018 Fig 2)", fontsize=11)
+             "Pure multiscale init (100 restarts); cf. Savage (2018) Fig 2 "
+             "[paper: sequential splits, 3 000 restarts]", fontsize=11)
 fig.tight_layout()
 fig.savefig(OUT / "fig7_k2to9_clusters.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
