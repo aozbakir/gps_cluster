@@ -55,7 +55,6 @@ MANIFEST
 # Data and Results
 data/*
 results/*
-scripts/*
 references/*
 docs/*
 

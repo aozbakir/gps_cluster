@@ -93,14 +93,29 @@ clusters = ftest.solutions[k_opt]
 
 ## Workflow
 
-Each region has a pair of scripts:
+Each region has a compute script (slow, run once) and a plot script (fast, cache-only):
 
 ```
-python scripts/compute_anatolia_clusters.py   # ~minutes → results/anatolia/clusters.json
-python scripts/plot_anatolia_clusters.py      # ~seconds → results/anatolia/fig*.png
+python scripts/compute_anatolia_clusters.py     # → results/anatolia/clusters.json
+python scripts/plot_anatolia_clusters.py        # → results/anatolia/fig*.png
+
+python scripts/compute_eaf_clusters.py          # → results/eaf/clusters.json
+python scripts/plot_eaf_clusters.py             # → results/eaf/fig*.png
+
+python scripts/compute_anatolia_eur_clusters.py # → results/anatolia_eur/clusters.json
+python scripts/plot_anatolia_eur.py             # → results/anatolia_eur/fig*.png
+
+python scripts/compute_marlborough_clusters.py  # → results/marlborough/clusters.json
+python scripts/plot_marlborough_clusters.py     # → results/marlborough/fig*.png
+
+python scripts/compute_japan_clusters.py        # → results/japan/clusters.json
+python scripts/plot_japan_clusters.py           # → results/japan/fig*.png
 ```
 
-Scripts follow the same pattern for `eaf`, `anatolia_eur`, and `marlborough`.
+The comparison figure (Turkey only):
+```
+python scripts/plot_comparison.py               # → results/anatolia/fig_comparison.png
+```
 
 ## Tests
 
