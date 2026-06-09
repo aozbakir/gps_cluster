@@ -13,10 +13,10 @@ Partitions GPS stations into *k* rigid blocks by iteratively inverting one Euler
 ## Install
 
 ```bash
-pip install -e ".[viz,dev]"
+pip install -e ".[dev]"
 ```
 
-Requires Python ≥ 3.10. Cartopy and Matplotlib are in the optional `viz` group.
+Requires Python ≥ 3.10.
 
 ## Usage
 
@@ -25,7 +25,7 @@ from gps_cluster.infrastructure.readers.velocity_csv import read_velocity_file
 from gps_cluster.application.preprocess import preprocess
 from gps_cluster.application.euler_clustering import EulerVectorClustering
 
-stations = preprocess(read_velocity_file("data/raw/gji_4600_SI_TablesS1.csv"))
+stations = preprocess(read_velocity_file("data/external/gji_4600_SI_TablesS1.csv"))
 evc = EulerVectorClustering(init="multiscale", n_restarts=100)
 clusters = evc.cluster(stations, k=3)
 ```
