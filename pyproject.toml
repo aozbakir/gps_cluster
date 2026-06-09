@@ -3,6 +3,38 @@
 requires = ["setuptools>=46.1.0", "setuptools_scm[toml]>=5", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "gps_cluster"
+description = "Bayesian Euler-vector clustering of GPS velocities"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dynamic = ["version"]          # version managed by setuptools_scm via git tags
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "pandas>=1.5",
+    "cartopy>=0.21",
+    "geopandas>=0.12",
+    "shapely>=2.0",
+    "pyproj>=3.4",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov",
+]
+
+[project.scripts]
+gps-cluster = "gps_cluster.interfaces.cli:cli"
+
 [tool.setuptools_scm]
 # See configuration details in https://github.com/pypa/setuptools_scm
 version_scheme = "no-guess-dev"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -24,7 +24,7 @@ from gps_cluster.infrastructure.readers.velocity_csv_nz import read_nz_csv
 #   data set: https://doi.org/10.21420/W08T-TY11?x=y
 
 ROOT   = Path(__file__).parent.parent
-DATA   = ROOT / "data/raw/nz_velocities.csv"
+DATA   = ROOT / "data/external/nz_velocities.csv"
 OUT    = ROOT / "reports/marlborough"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)

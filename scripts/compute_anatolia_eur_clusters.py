@@ -4,7 +4,7 @@ GNSS velocity field and write JSON cache.
 Runs both the Savage (2018) hard-assignment algorithm and the new
 EM soft-assignment extension.
 
-Input:  data/raw/gnss_vel_euro_kurt2022.dat  (lon lat ve vn se sn)
+Input:  data/external/gnss_vel_euro_kurt2022.dat  (lon lat ve vn se sn)
 Output: reports/anatolia_eur/clusters.json
 """
 
@@ -26,7 +26,7 @@ from gps_cluster.domain.services.euler_math import assignment_probabilities
 from gps_cluster.infrastructure.readers.velocity_dat import read_dat_file
 
 ROOT   = Path(__file__).parent.parent
-DATA   = ROOT / "data/raw/gnss_vel_euro_kurt2022.dat"
+DATA   = ROOT / "data/external/gnss_vel_euro_kurt2022.dat"
 OUT    = ROOT / "reports/anatolia_eur"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)

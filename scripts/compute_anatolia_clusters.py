@@ -24,7 +24,7 @@ from gps_cluster.domain.services.euler_math import assignment_probabilities
 from gps_cluster.infrastructure.readers.velocity_vel import read_vel_file
 
 ROOT   = Path(__file__).parent.parent
-DATA   = ROOT / "data/raw/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
+DATA   = ROOT / "data/external/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
 OUT    = ROOT / "reports/anatolia"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)
