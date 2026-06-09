@@ -11,6 +11,7 @@ Figures produced:
   fig5_clusters_best_k.png  — k=k_gap map + velocity arrows
   fig6_residuals.png        — cluster map + residual vectors
   fig7_k2to7_clusters.png   — k=2..7 grid
+  fig8_entropy.png          — VB soft-assignment entropy at k=k_gap
 """
 
 from __future__ import annotations
@@ -299,4 +300,47 @@ fig.suptitle("Euler-vector clustering — Euro-fixed GPS (Kurt et al. 2022)\n"
 fig.savefig(OUT / "fig7_k2to7_clusters.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 
+# ── Fig 8: VB soft-assignment entropy map ─────────────────────────────────────
+print(f"Plotting Fig 8: VB entropy map (k={k_gap}) …")
+_ent_key = f"vb_entropy_k{k_gap}"
+_ent_by_name = {
+    r["name"]: r[_ent_key]
+    for r in cache["stations"]
+    if _ent_key in r
+}
+entropy     = np.array([_ent_by_name.get(s.name, 0.0) for s in stations])
+max_entropy = np.log(k_gap)   # theoretical maximum = log(k) nats
+
+fig, ax = plt.subplots(figsize=(16, 8), subplot_kw={"projection": ccrs.Mercator()})
+_basemap(ax)
+
+lons = np.array([s.position.lon for s in stations])
+lats = np.array([s.position.lat for s in stations])
+
+sc = ax.scatter(lons, lats,
+                c=entropy, cmap="RdYlGn_r",
+                vmin=0, vmax=max_entropy,
+                s=22, edgecolors="k", linewidths=0.2,
+                transform=ccrs.PlateCarree(), zorder=4)
+
+cbar = fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02)
+cbar.set_label("VB soft-assignment entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
+               fontsize=9)
+cbar.set_ticks([0, max_entropy / 2, max_entropy])
+cbar.set_ticklabels(["0\n(certain)", f"{max_entropy/2:.2f}",
+                     f"{max_entropy:.2f}\n(uniform)"])
+
+_draw_faults(ax)
+
+high_ent_pct = int(100 * np.mean(entropy > 0.5 * max_entropy))
+ax.set_title(
+    f"VB soft-assignment entropy — k = {k_gap}  (Euro-fixed, Kurt et al. 2022)\n"
+    f"Red = ambiguous (≥½ max entropy: {high_ent_pct}% of stations)   "
+    f"Green = certain   max = log({k_gap}) = {max_entropy:.2f} nats",
+    fontsize=11)
+fig.savefig(OUT / "fig8_entropy.png", dpi=180, bbox_inches="tight")
+plt.close(fig)
+
 print(f"\nAll figures saved to {OUT}/")
+print(f"  Mean VB entropy: {entropy.mean():.4f} / {max_entropy:.3f} nats  "
+      f"({100 * entropy.mean() / max_entropy:.1f}% of max)")
