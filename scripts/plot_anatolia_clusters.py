@@ -436,21 +436,21 @@ plt.close(fig)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Figure 8 — EM soft-assignment entropy map
 # Loaded from the JSON cache (computed by compute_anatolia_clusters.py).
-# EM entropy reflects genuine kinematic ambiguity — stations near block
-# boundaries get soft weights rather than a hard assignment, so their
-# entropy is elevated even when the hard clustering is confident.
+# VB entropy reflects genuine kinematic ambiguity — the distance-to-centroid
+# prior prevents teleportation without penalising fault boundaries, so
+# entropy is elevated exactly where block assignment is genuinely uncertain.
 # ═══════════════════════════════════════════════════════════════════════════════
 # _cache already loaded at module top — no re-read needed.
-k_em   = _cache["em"]["k"]
-_em_entropy_by_name = {
-    r["name"]: r["em_entropy"]
+k_best = _cache["gap"]["k_max_gap"]
+_vb_entropy_by_name = {
+    r["name"]: r[f"vb_entropy_k{k_best}"]
     for r in _cache["stations"]
-    if "em_entropy" in r
+    if f"vb_entropy_k{k_best}" in r
 }
-entropy     = np.array([_em_entropy_by_name.get(s.name, 0.0) for s in stations])
-max_entropy = np.log(k_em)   # theoretical maximum for k_em clusters
+entropy     = np.array([_vb_entropy_by_name.get(s.name, 0.0) for s in stations])
+max_entropy = np.log(k_best)   # theoretical maximum for k_best clusters
 
-print(f"Plotting Fig 8: EM entropy map (k_em={k_em}) …")
+print(f"Plotting Fig 8: VB entropy map (k={k_best}) …")
 
 fig, ax = plt.subplots(figsize=(16, 8), subplot_kw={"projection": ccrs.Mercator()})
 _basemap(ax)
@@ -465,7 +465,7 @@ sc = ax.scatter(lons, lats,
                 transform=ccrs.PlateCarree(), zorder=4)
 
 cbar = fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02)
-cbar.set_label("EM soft-assignment entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
+cbar.set_label("VB soft-assignment entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
                fontsize=9)
 cbar.set_ticks([0, max_entropy / 2, max_entropy])
 cbar.set_ticklabels(["0\n(certain)", f"{max_entropy/2:.2f}",
@@ -486,13 +486,13 @@ if FAULT_FILE.exists():
 
 high_ent_pct = int(100 * np.mean(entropy > 0.5 * max_entropy))
 ax.set_title(
-    f"EM soft-assignment entropy — k = {k_em}  (ITRF14)\n"
+    f"VB soft-assignment entropy — k = {k_best}  (ITRF14)\n"
     f"Red = ambiguous (≥½ max entropy: {high_ent_pct}% of stations)   "
-    f"Green = certain   max entropy = log({k_em}) = {max_entropy:.2f} nats",
+    f"Green = certain   max entropy = log({k_best}) = {max_entropy:.2f} nats",
     fontsize=11)
 fig.savefig(OUT / "fig8_entropy.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
 
 print(f"\nAll figures saved to {OUT}/")
-print(f"  Mean EM entropy: {entropy.mean():.3f} / {max_entropy:.3f} nats  "
+print(f"  Mean VB entropy: {entropy.mean():.3f} / {max_entropy:.3f} nats  "
       f"({100*entropy.mean()/max_entropy:.0f}% of max)")
