@@ -505,98 +505,123 @@ def soft_weights_from_euler_map(
     return p   # (N, k)
 
 
-def spatial_soft_weights(
+def distance_soft_weights(
     stations: list[GpsStation],
-    euler_map: dict,          # {cluster_id: EulerVector}, sorted by key
-    adjacency: "csr_matrix",  # scipy sparse (N, N) Delaunay adjacency
-    beta: float = 1.0,
+    euler_map: dict,
+    gamma: float = 4e-6,
     pi: "np.ndarray | None" = None,
     tol: float = 1e-4,
-    max_inner: int = 30,
+    max_iter: int = 50,
 ) -> np.ndarray:
-    """Variational Bayes E-step with Potts spatial prior.
+    """Variational Bayes E-step with distance-to-centroid spatial prior.
 
-    Computes the mean-field posterior over cluster assignments:
+    Posterior over cluster assignments:
 
-        log w[i, k] = -chi2[i,k]/2 + log(pi[k])
-                      + beta * sum_{j in N(i)} w[j, k]
+        log w[i, k] = -chi²[i,k]/2 + log(π[k]) - γ · d²(i, x̄_k)
 
-    where N(i) is the set of Delaunay neighbours of station i.  The
-    equation is iterated (inner loop) until the weight matrix converges
-    to the mean-field fixed point.
+    where x̄_k = Σ_i w[i,k] · x_i / Σ_i w[i,k] is the soft-weighted
+    geographic centroid of cluster k (in km via great-circle distance)
+    and γ (nats/km²) is the spatial penalty strength.
+
+    Physical interpretation
+    -----------------------
+    γ = 1/R₀² where R₀ is the characteristic block radius.
+    Default R₀ = 500 km → γ = 4×10⁻⁶ nats/km²:
+
+    - Station 200 km from centroid:  penalty = 0.16 nats  (negligible)
+    - Station 500 km from centroid:  penalty = 1.00 nats  (moderate)
+    - Station 900 km from centroid:  penalty = 3.24 nats  (strong)
+
+    Unlike the Potts model, this prior does *not* penalise geographic
+    neighbours that correctly belong to different clusters (i.e. stations
+    on opposite sides of a fault).  It only penalises teleportation: a
+    station joining a cluster whose centroid is far away.
+
+    The centroid and weights are coupled (centroid depends on weights and
+    vice versa), so they are iterated to a fixed point with the chi²
+    matrix held fixed.  Given fixed centroids the per-station weight
+    updates are independent, so no inner coupling loop is required —
+    convergence is guaranteed.
 
     Parameters
     ----------
     stations:
         All GPS stations (length N).
     euler_map:
-        Dict mapping cluster id → EulerVector.  Keys are iterated in
-        sorted order so column j always refers to the same cluster.
-    adjacency:
-        Sparse (N, N) Delaunay adjacency matrix from
-        :func:`gps_cluster.domain.services.spatial.adjacency_matrix`.
-    beta:
-        Spatial coupling strength (Potts inverse temperature).
-        beta = 0 → flat spatial prior (same as current EM).
-        beta = 1 → each Delaunay neighbour in cluster k adds 1 nat
-        to the log-probability of being in k (balanced with ~6-neighbour
-        mean-field and typical inter-block chi²/2 of ~10-15 nats).
-        Geophysically meaningful range: [0.5, 3.0].
+        Dict mapping cluster id → EulerVector.  Iterated in sorted key
+        order so column j always refers to the same cluster.
+    gamma:
+        Spatial penalty (nats/km²).  Default 4×10⁻⁶ = 1/(500 km)².
+        Set gamma=0 to recover pure kinematic EM (no spatial prior).
     pi:
-        Mixing proportions, shape (K,).  None → uniform (1/K each).
+        Mixing proportions shape (K,).  None → uniform.
     tol:
-        Inner-loop convergence tolerance on max element-wise weight change.
-    max_inner:
-        Maximum inner-loop iterations.
+        Convergence tolerance on max element-wise weight change.
+    max_iter:
+        Maximum iterations for the centroid ↔ weight fixed point.
 
     Returns
     -------
-    ndarray shape (N, K) — posterior assignment probabilities w[i, k].
-    Rows sum to 1.
+    ndarray shape (N, K) — posterior assignment probabilities.  Rows
+    sum to 1.
     """
     N = len(stations)
     keys = sorted(euler_map.keys())
     K = len(keys)
 
-    # ── Vectorised chi² matrix  (N, K) ──────────────────────────────────────
-    # Precompute once; only changes between outer EM iterations.
-    G = design_matrix(stations)                                   # (2N, 3)
-    v_obs = np.array(
-        [v for s in stations for v in (s.velocity.ve, s.velocity.vn)]
-    )                                                              # (2N,)
-    sigmas = np.array(
-        [v for s in stations for v in (s.velocity.se, s.velocity.sn)]
-    )                                                              # (2N,)
+    # ── Station positions ────────────────────────────────────────────────────
+    st_lats = np.array([s.position.lat for s in stations])   # (N,)
+    st_lons = np.array([s.position.lon for s in stations])   # (N,)
 
-    omegas = np.array([euler_map[k].to_array() for k in keys])   # (K, 3)
-    V_pred = G @ omegas.T                                         # (2N, K)
-    resid = (v_obs[:, np.newaxis] - V_pred) / sigmas[:, np.newaxis]  # (2N, K)
-    chi2 = resid[0::2] ** 2 + resid[1::2] ** 2                   # (N, K)
+    # ── Vectorised chi² matrix  (N, K) ──────────────────────────────────────
+    G      = design_matrix(stations)                          # (2N, 3)
+    v_obs  = np.array([v for s in stations
+                       for v in (s.velocity.ve, s.velocity.vn)])  # (2N,)
+    sigmas = np.array([v for s in stations
+                       for v in (s.velocity.se, s.velocity.sn)])  # (2N,)
+    omegas = np.array([euler_map[k].to_array() for k in keys])    # (K, 3)
+    V_pred = G @ omegas.T                                          # (2N, K)
+    resid  = (v_obs[:, np.newaxis] - V_pred) / sigmas[:, np.newaxis]
+    chi2   = resid[0::2] ** 2 + resid[1::2] ** 2              # (N, K)
 
     # ── Log mixing proportions ───────────────────────────────────────────────
-    if pi is None:
-        log_pi = np.zeros(K)
-    else:
-        log_pi = np.log(np.clip(pi, 1e-300, None))
+    log_pi = (np.zeros(K) if pi is None
+              else np.log(np.clip(pi, 1e-300, None)))
 
-    # ── Initialise from likelihood only (beta = 0 solution) ─────────────────
+    # ── Initialise from likelihood only (gamma = 0 solution) ────────────────
     log_w = -0.5 * chi2 + log_pi[np.newaxis, :]
     log_w -= log_w.max(axis=1, keepdims=True)
     w = np.exp(log_w)
     w /= w.sum(axis=1, keepdims=True)
 
-    if beta == 0.0:
+    if gamma == 0.0:
         return w
 
-    # ── Mean-field inner loop ────────────────────────────────────────────────
-    # spatial[i, k] = beta * sum_{j in N(i)} w[j, k]  via sparse matmul
-    for _ in range(max_inner):
+    # ── Centroid ↔ weight fixed-point loop ───────────────────────────────────
+    for _ in range(max_iter):
         w_prev = w
-        spatial = beta * (adjacency @ w)                  # (N, K)
-        log_w = -0.5 * chi2 + log_pi[np.newaxis, :] + spatial
+
+        # Soft-weighted centroids  (K,)
+        total_w   = w.sum(axis=0) + 1e-12            # (K,)
+        c_lats = (w.T @ st_lats) / total_w           # (K,)
+        c_lons = (w.T @ st_lons) / total_w           # (K,)
+
+        # Great-circle distance² (N, K) in km²
+        phi1   = np.radians(st_lats[:, np.newaxis])  # (N, 1)
+        phi2   = np.radians(c_lats[np.newaxis, :])   # (1, K)
+        dphi   = np.radians(c_lats[np.newaxis, :] - st_lats[:, np.newaxis])
+        dlam   = np.radians(c_lons[np.newaxis, :] - st_lons[:, np.newaxis])
+        a      = (np.sin(dphi / 2) ** 2
+                  + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2)
+        d_km   = 6371.0 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+        d2_km2 = d_km ** 2                            # (N, K)
+
+        # Updated weights
+        log_w = -0.5 * chi2 + log_pi[np.newaxis, :] - gamma * d2_km2
         log_w -= log_w.max(axis=1, keepdims=True)
         w = np.exp(log_w)
         w /= w.sum(axis=1, keepdims=True)
+
         if np.max(np.abs(w - w_prev)) < tol:
             break
 

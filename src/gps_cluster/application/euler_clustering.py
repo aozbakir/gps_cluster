@@ -42,10 +42,10 @@ from scipy.stats import f as f_dist
 
 from gps_cluster.domain.entities import EulerVector, GpsStation, VelocityCluster
 from gps_cluster.domain.services.euler_math import (
+    distance_soft_weights,
     invert_euler_vector,
     invert_euler_vector_weighted,
     soft_weights_from_euler_map,
-    spatial_soft_weights,
     total_chi_squared,
     unweighted_residual_sq,
     weighted_residual_sq,  # kept for chi² bookkeeping; not used in Savage reassignment
@@ -630,83 +630,89 @@ def bootstrap_pole_uncertainty(
 
 
 class SpatialBayesianEulerClustering:
-    """Fully Bayesian Euler-vector clustering with Potts spatial prior.
+    """Fully Bayesian Euler-vector clustering with distance-to-centroid prior.
 
     Extends the EM algorithm (EMEulerVectorClustering) to a Variational
     Bayes EM (VBEM) that encodes the physical prior that tectonic blocks
-    are spatially coherent.
+    are spatially compact.
 
     Model
     -----
     Likelihood:
         p(v_i | z_i=k, ω_k) = N(G_i ω_k, Σ_i)   [Gaussian GPS errors]
 
-    Prior on cluster assignments — Potts model on Delaunay graph:
-        p(z | π, β) ∝ Π_i π_{z_i} · exp(β Σ_{(i,j)∈E} δ(z_i, z_j))
-        where E is the Delaunay edge set and β is the spatial coupling.
+    Prior on cluster assignments — distance to geographic centroid:
+        log p(z_i=k | x̄_k) ∝ -γ · d²(x_i, x̄_k)
+        where x̄_k is the soft-weighted centroid of cluster k and
+        d is great-circle distance in km.
 
     Prior on Euler vectors:
-        p(ω_k) ∝ 1  (flat/improper) → posterior is Gaussian N(ω̂_k, C_k)
-        where ω̂_k is the WLS estimate and C_k its covariance.
+        p(ω_k) ∝ 1  (flat) → posterior is Gaussian N(ω̂_k, C_k).
 
     Prior on mixing proportions:
-        p(π) = Dir(α, …, α),  α = 1  (uniform)
+        p(π) = Dir(α=1, …)  (uniform over simplex).
 
-    Inference — mean-field Variational Bayes
-    ----------------------------------------
+    Inference — Variational Bayes EM
+    ---------------------------------
     Approximate posterior: q(z) = Π_i q_i(z_i)
 
-    E-step (inner loop until convergence):
-        log q_i(k) = -χ²_{ik}/2 + log π̂_k + β Σ_{j∈N(i)} q_j(k)
-        normalise each row to sum to 1.
+    E-step (iterated centroid ↔ weight fixed point):
+        x̄_k   = Σ_i w_{ik} · x_i / Σ_i w_{ik}          (centroid update)
+        log q_i(k) = -χ²_{ik}/2 + log π̂_k - γ · d²(x_i, x̄_k)
+        w_{ik} = softmax_k(log q_i(k))                   (weight update)
 
     M-step:
-        ω̂_k, C_k  = weighted WLS with weights w_{ik}/σ_i²
-        π̂_k       = (α + Σ_i w_{ik}) / (Kα + N)     [Dirichlet posterior]
+        ω̂_k, C_k = weighted WLS with weights w_{ik}/σ_i²
+        π̂_k      = (1 + Σ_i w_{ik}) / (K + N)
 
-    The spatial term β Σ_{j∈N(i)} q_j(k) is the mean-field approximation
-    to the Potts log-prior: it rewards assigning station i to cluster k
-    when its Delaunay neighbours are also in k.  At β = 0 this reduces
-    exactly to the existing EMEulerVectorClustering.
+    Advantages over the Potts model
+    --------------------------------
+    - Does NOT penalise geographic neighbours in different clusters, so
+      real fault boundaries are correctly resolved.
+    - Only penalises teleportation: a station joining a cluster whose
+      centroid is far away.
+    - Parameter γ has physical units (nats/km²) and a clear meaning:
+      γ = 1/R₀² where R₀ is the characteristic block radius.
+    - No graph structure required; no inner mean-field coupling loop.
+    - At γ = 0 reduces exactly to EMEulerVectorClustering.
 
     Parameters
     ----------
-    beta:
-        Spatial coupling strength.  β = 0 → pure kinematic EM.
-        β = 1 → each geographic neighbour in cluster k adds 1 nat;
-        balanced with ~6 Delaunay neighbours and inter-block χ²/2 ≈ 10.
-        Physically meaningful range: [0.5, 3.0].
+    gamma:
+        Distance penalty (nats/km²).  Default 4×10⁻⁶ = 1/(500 km)².
+        Recommended range: [1e-6, 1e-4].  Cross-validate on held-out
+        stations for a principled choice.
     max_iter:
-        Maximum outer VB-EM iterations.
+        Maximum VB-EM iterations.
     tol:
-        Outer convergence tolerance on max element-wise weight change.
-    inner_tol / inner_max_iter:
-        Convergence parameters for the E-step inner loop.
+        Convergence tolerance on max element-wise weight change.
+    e_max_iter / e_tol:
+        Convergence parameters for the E-step centroid ↔ weight loop.
     n_restarts:
-        Passed to the hard-clustering initialiser (multiscale).
+        Passed to the hard-clustering multiscale initialiser.
     random_seed:
-        Seed for multiscale initialiser random restarts.
+        Seed for multiscale initialiser.
     min_weight_sum:
-        Minimum effective station count per cluster (Σ_i w_{ik}) needed
-        to attempt a WLS inversion; below this the Euler vector is zeroed.
+        Minimum effective station count per cluster (Σ_i w_{ik}) to
+        attempt WLS inversion; below this the Euler vector is zeroed.
     """
 
     def __init__(
         self,
-        beta: float = 1.0,
+        gamma: float = 4e-6,
         max_iter: int = 100,
         tol: float = 1e-4,
-        inner_tol: float = 1e-4,
-        inner_max_iter: int = 30,
+        e_tol: float = 1e-4,
+        e_max_iter: int = 50,
         n_restarts: int = 20,
         random_seed: int = 0,
         min_weight_sum: float = 2.0,
     ) -> None:
-        self.beta = beta
+        self.gamma = gamma
         self.max_iter = max_iter
         self.tol = tol
-        self.inner_tol = inner_tol
-        self.inner_max_iter = inner_max_iter
+        self.e_tol = e_tol
+        self.e_max_iter = e_max_iter
         self.n_restarts = n_restarts
         self.random_seed = random_seed
         self.min_weight_sum = min_weight_sum
@@ -725,7 +731,7 @@ class SpatialBayesianEulerClustering:
         stations: list[GpsStation],
         k: int,
     ) -> list[VelocityCluster]:
-        """Partition stations into k clusters via spatial VB-EM.
+        """Partition stations into k clusters via distance-prior VB-EM.
 
         Returns
         -------
@@ -733,52 +739,39 @@ class SpatialBayesianEulerClustering:
             Hard-assigned clusters (argmax of final weight matrix) with:
             - ``euler_vector`` : soft-weighted WLS estimate
             - ``chi2`` / ``chi2_reduced`` : computed on hard-assigned members
-            - ``membership_weights`` : ndarray (N,) — VB posterior q_i(k)
-              for this cluster over *all* N stations.  Entropy of these
-              weights is now geophysically informative: elevated near
-              block boundaries and at strain-contaminated stations.
+            - ``membership_weights`` : ndarray (N,) — VB posterior w_{ik}
+              over all N stations.  Shannon entropy of these weights is
+              geophysically informative: elevated at block boundaries and
+              at strain-contaminated stations near locked faults.
         """
-        from gps_cluster.domain.services.spatial import (
-            adjacency_matrix,
-            delaunay_graph,
-        )
-
         N = len(stations)
 
-        # ── Build Delaunay graph (once per cluster call) ─────────────────────
-        graph = delaunay_graph(stations)
-        adj   = adjacency_matrix(graph, N)
-
         # ── Initialise from hard-assignment clustering ────────────────────────
-        # Multiscale init gives a physically reasonable starting point and
-        # avoids label-switching degeneracy of random VB initialisation.
         hard_clusters = self._hard.cluster(stations, k)
         euler_map: dict[int, EulerVector] = {
             c.id: c.euler_vector
             for c in hard_clusters
             if c.euler_vector is not None
         }
-        # Fill any empty clusters with zero vector
         for cid in range(1, k + 1):
             if cid not in euler_map:
                 euler_map[cid] = EulerVector(0.0, 0.0, 0.0)
 
-        # Mixing proportions: initialise from hard cluster sizes
         pi = np.array([
             next((c.size for c in hard_clusters if c.id == cid), 1)
             for cid in range(1, k + 1)
         ], dtype=float)
         pi /= pi.sum()
 
-        # ── VB-EM outer loop ──────────────────────────────────────────────────
+        # ── VB-EM loop ────────────────────────────────────────────────────────
         weights: np.ndarray | None = None
 
-        for _outer in range(self.max_iter):
-            # E-step: mean-field update with spatial prior
-            w_new = spatial_soft_weights(
-                stations, euler_map, adj,
-                beta=self.beta, pi=pi,
-                tol=self.inner_tol, max_inner=self.inner_max_iter,
+        for _iter in range(self.max_iter):
+            # E-step: distance-to-centroid posterior
+            w_new = distance_soft_weights(
+                stations, euler_map,
+                gamma=self.gamma, pi=pi,
+                tol=self.e_tol, max_iter=self.e_max_iter,
             )
 
             # M-step: weighted WLS per cluster
@@ -790,10 +783,9 @@ class SpatialBayesianEulerClustering:
                 else:
                     new_euler_map[cid] = EulerVector(0.0, 0.0, 0.0)
 
-            # Update mixing proportions (Dirichlet posterior, α = 1)
+            # Dirichlet posterior on mixing proportions (α = 1)
             pi = (w_new.sum(axis=0) + 1.0) / (N + k)
 
-            # Convergence check on weight matrix
             if weights is not None and np.max(np.abs(w_new - weights)) < self.tol:
                 weights = w_new
                 euler_map = new_euler_map
@@ -805,8 +797,7 @@ class SpatialBayesianEulerClustering:
         if weights is None:
             weights = w_new  # type: ignore[possibly-undefined]
 
-        # ── Build output clusters ─────────────────────────────────────────────
-        labels = np.argmax(weights, axis=1) + 1   # 1-indexed hard assignment
+        labels = np.argmax(weights, axis=1) + 1   # 1-indexed
         return self._build_clusters(stations, labels, k, euler_map, weights)
 
     def find_optimal_k(
