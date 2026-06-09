@@ -512,16 +512,24 @@ def distance_soft_weights(
     pi: "np.ndarray | None" = None,
     tol: float = 1e-4,
     max_iter: int = 50,
+    chi2_scale: float | None = None,
 ) -> np.ndarray:
     """Variational Bayes E-step with distance-to-centroid spatial prior.
 
     Posterior over cluster assignments:
 
-        log w[i, k] = -chi²[i,k]/2 + log(π[k]) - γ · d²(i, x̄_k)
+        log w[i, k] = -chi²[i,k] / (2·s) + log(π[k]) - γ · d²(i, x̄_k)
 
-    where x̄_k = Σ_i w[i,k] · x_i / Σ_i w[i,k] is the soft-weighted
-    geographic centroid of cluster k (in km via great-circle distance)
+    where s = chi2_scale (the within-cluster reduced chi² from the previous
+    M-step), x̄_k is the soft-weighted geographic centroid of cluster k in km,
     and γ (nats/km²) is the spatial penalty strength.
+
+    When chi2_scale is provided (recommended for χ²_red >> 1 datasets), chi²
+    is divided by chi2_scale before computing weights.  This makes the
+    likelihood contribution per station ≈ 1 nat regardless of absolute sigma
+    magnitude, so the spatial prior γ·d² always competes on equal footing.
+    Without scaling, datasets with very small measurement uncertainties
+    (χ²_red >> 1) collapse to hard assignment because exp(−chi²/2) ≈ 0.
 
     Physical interpretation
     -----------------------
@@ -584,12 +592,21 @@ def distance_soft_weights(
     resid  = (v_obs[:, np.newaxis] - V_pred) / sigmas[:, np.newaxis]
     chi2   = resid[0::2] ** 2 + resid[1::2] ** 2              # (N, K)
 
+    # ── Normalise chi² so that the spatial prior can compete ─────────────────
+    # When chi2_scale is provided (the within-cluster chi²_red from the last
+    # M-step) chi² is rescaled to O(1) per station.  Without this, datasets
+    # where chi²_red >> 1 (precise measurements, imperfect plate model) produce
+    # exp(−chi²/2) ≈ 0 even for the best-fit cluster, collapsing weights to
+    # hard {0, 1} and defeating the spatial prior.
+    scale  = float(chi2_scale) if (chi2_scale is not None and chi2_scale > 0) else 1.0
+    eff_chi2 = chi2 / scale                                    # (N, K), O(1)/station
+
     # ── Log mixing proportions ───────────────────────────────────────────────
     log_pi = (np.zeros(K) if pi is None
               else np.log(np.clip(pi, 1e-300, None)))
 
     # ── Initialise from likelihood only (gamma = 0 solution) ────────────────
-    log_w = -0.5 * chi2 + log_pi[np.newaxis, :]
+    log_w = -0.5 * eff_chi2 + log_pi[np.newaxis, :]
     log_w -= log_w.max(axis=1, keepdims=True)
     w = np.exp(log_w)
     w /= w.sum(axis=1, keepdims=True)
@@ -616,8 +633,8 @@ def distance_soft_weights(
         d_km   = 6371.0 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
         d2_km2 = d_km ** 2                            # (N, K)
 
-        # Updated weights
-        log_w = -0.5 * chi2 + log_pi[np.newaxis, :] - gamma * d2_km2
+        # Updated weights (use scaled chi² throughout the inner loop)
+        log_w = -0.5 * eff_chi2 + log_pi[np.newaxis, :] - gamma * d2_km2
         log_w -= log_w.max(axis=1, keepdims=True)
         w = np.exp(log_w)
         w /= w.sum(axis=1, keepdims=True)

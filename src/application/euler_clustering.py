@@ -707,6 +707,7 @@ class SpatialBayesianEulerClustering:
         n_restarts: int = 20,
         random_seed: int = 0,
         min_weight_sum: float = 2.0,
+        normalize_chi2: bool = True,
     ) -> None:
         self.gamma = gamma
         self.max_iter = max_iter
@@ -716,6 +717,7 @@ class SpatialBayesianEulerClustering:
         self.n_restarts = n_restarts
         self.random_seed = random_seed
         self.min_weight_sum = min_weight_sum
+        self.normalize_chi2 = normalize_chi2
         self._hard = EulerVectorClustering(
             init="multiscale",
             n_restarts=n_restarts,
@@ -763,15 +765,21 @@ class SpatialBayesianEulerClustering:
         ], dtype=float)
         pi /= pi.sum()
 
+        # ── Initial chi²_scale from hard clustering ───────────────────────────
+        # Normalises the log-likelihood contribution to ~1 nat/station so that
+        # the spatial prior γ·d² can compete even when chi²_red >> 1.
+        chi2_scale = self._chi2_scale(hard_clusters, N, k)
+
         # ── VB-EM loop ────────────────────────────────────────────────────────
         weights: np.ndarray | None = None
 
         for _iter in range(self.max_iter):
-            # E-step: distance-to-centroid posterior
+            # E-step: distance-to-centroid posterior (with optional chi² scaling)
             w_new = distance_soft_weights(
                 stations, euler_map,
                 gamma=self.gamma, pi=pi,
                 tol=self.e_tol, max_iter=self.e_max_iter,
+                chi2_scale=chi2_scale,
             )
 
             # M-step: weighted WLS per cluster
@@ -785,6 +793,11 @@ class SpatialBayesianEulerClustering:
 
             # Dirichlet posterior on mixing proportions (α = 1)
             pi = (w_new.sum(axis=0) + 1.0) / (N + k)
+
+            # Update chi²_scale from current (soft-assigned) chi²_red
+            chi2_scale = self._chi2_scale_from_map(
+                stations, new_euler_map, np.argmax(w_new, axis=1) + 1, N, k
+            )
 
             if weights is not None and np.max(np.abs(w_new - weights)) < self.tol:
                 weights = w_new
@@ -850,6 +863,40 @@ class SpatialBayesianEulerClustering:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _chi2_scale(self, clusters: list, N: int, k: int) -> "float | None":
+        """Return chi²_red from a list of VelocityCluster (hard assignment).
+
+        Returns None when normalize_chi2 is False, which passes through to
+        distance_soft_weights as no scaling (original behaviour).
+        """
+        if not self.normalize_chi2:
+            return None
+        chi2_total = sum((c.chi2 or 0.0) for c in clusters)
+        dof = max(2 * N - 3 * k, 1)
+        return max(chi2_total / dof, 1.0)
+
+    def _chi2_scale_from_map(
+        self,
+        stations: list,
+        euler_map: dict,
+        labels: "np.ndarray",
+        N: int,
+        k: int,
+    ) -> "float | None":
+        """Return chi²_red from current euler_map + hard-assigned labels."""
+        if not self.normalize_chi2:
+            return None
+        chi2_total = 0.0
+        for cid in sorted(euler_map.keys()):
+            ev = euler_map[cid]
+            if ev is None or (ev.ox == 0.0 and ev.oy == 0.0 and ev.oz == 0.0):
+                continue
+            members = [s for s, lbl in zip(stations, labels) if lbl == cid]
+            if members:
+                chi2_total += total_chi_squared(members, ev)
+        dof = max(2 * N - 3 * k, 1)
+        return max(chi2_total / dof, 1.0)
 
     def _build_clusters(
         self,
