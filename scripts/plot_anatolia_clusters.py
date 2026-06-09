@@ -17,7 +17,9 @@ All figures saved to reports/anatolia/.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -30,28 +32,53 @@ from matplotlib.lines import Line2D
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial import ConvexHull
 
-from gps_cluster.application.euler_clustering import EulerVectorClustering
-from gps_cluster.application.preprocess import preprocess
-from gps_cluster.application.velocity_clustering import VelocityHACClustering
+from gps_cluster.domain.entities import GpsStation, Position, Velocity
 from gps_cluster.domain.services.euler_math import (
+    EulerVector,
     euler_vector_to_pole,
     predict_velocity,
 )
-from gps_cluster.infrastructure.readers.velocity_vel import read_vel_file
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent.parent
-DATA       = ROOT / "data/raw/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
+CACHE      = ROOT / "reports/anatolia/clusters.json"
 FAULT_FILE = ROOT / "data/raw/anatolia_slip_rate_faults_simplified.geojson"
 OUT        = ROOT / "reports/anatolia"
 OUT.mkdir(parents=True, exist_ok=True)
 
-# ── load data ─────────────────────────────────────────────────────────────────
-raw      = read_vel_file(DATA)
-# Keep all stations: outlier removal by velocity magnitude would discard
-# real tectonic signals (Arabia/Eurasia contrast).  Only flag excessive sigmas.
-stations = preprocess(raw, max_sigma=99, zscore_threshold=99)
-print(f"Stations: raw={len(raw)}, clean={len(stations)}")
+# ── load cache ────────────────────────────────────────────────────────────────
+# LN 33-35 / 50-53 core issue: EulerVectorClustering.find_optimal_k() and
+# VelocityHACClustering.find_optimal_k() were called at plot time (minutes).
+# Fix: read gap/ftest/solutions from clusters.json written by compute script.
+if not CACHE.exists():
+    raise FileNotFoundError(f"{CACHE} — run compute_anatolia_clusters.py first")
+
+with open(CACHE) as _f:
+    _cache = json.load(_f)
+
+# LN 50-53: read_vel_file + preprocess replaced by cache stations.
+stations = [
+    GpsStation(name=r["name"], position=Position(lat=r["lat"], lon=r["lon"]),
+               velocity=Velocity(ve=r["ve"], vn=r["vn"], vu=0.0,
+                                 se=r["se"], sn=r["sn"], su=1.0))
+    for r in _cache["stations"]
+]
+station_by_name = {s.name: s for s in stations}
+print(f"Stations loaded from cache: {len(stations)}")
+
+
+def _load_solution(k: int):
+    """Reconstruct cluster list from JSON cache for given k."""
+    sol = []
+    for c in _cache["solutions"][str(k)]:
+        ev = EulerVector(ox=c["euler"]["ox"], oy=c["euler"]["oy"], oz=c["euler"]["oz"])
+        sol.append(SimpleNamespace(
+            id=c["id"], size=c["size"], chi2=c["chi2"],
+            euler_vector=ev,
+            pole=SimpleNamespace(**c["pole"]),
+            stations=[station_by_name[n] for n in c["stations"] if n in station_by_name],
+        ))
+    return sol
 
 EXTENT = [25.0, 45.5, 35.5, 43.0]   # [lon_min, lon_max, lat_min, lat_max]
 CMAP   = plt.colormaps["tab10"]
@@ -204,10 +231,14 @@ plt.close(fig)
 # Figure 3 — HAC dendrogram + gap statistic
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 3: HAC dendrogram + gap statistic …")
-hac      = VelocityHACClustering()
-Z        = hac.fit(stations)
-_, gap_result = hac.find_optimal_k(stations, max_k=7, n_ref=30)
-k_gap = gap_result.k_max_gap   # max-Gap criterion; first-crossing trivially picks k=1 here
+# LN 207-209 core issue: VelocityHACClustering.find_optimal_k() reran gap
+# statistic (n_ref=30 Monte Carlo references) — ~minutes.
+# Fix: read gap results from cache; recompute only linkage Z for dendrogram
+# (scipy linkage on 836 pts is sub-second — no cache entry for Z).
+_vel_arr = np.array([[s.velocity.ve, s.velocity.vn] for s in stations])
+Z        = linkage(_vel_arr, method="centroid", metric="euclidean")
+gap_result = SimpleNamespace(**_cache["gap"])
+k_gap      = gap_result.k_max_gap
 print(f"  Gap optimal k = {k_gap}")
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
@@ -236,8 +267,10 @@ plt.close(fig)
 # Figure 4 — Euler chi²_red vs k  +  marginal improvement (Δchi²_red)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Plotting Fig 4: Euler chi² vs k …")
-evc = EulerVectorClustering(init="multiscale", n_restarts=20, random_seed=0)
-_, ftest = evc.find_optimal_k(stations, max_k=7)
+# LN 239-240 core issue: EulerVectorClustering.find_optimal_k() re-ran all
+# k=1..7 with 20 multiscale restarts — the dominant slow step (~minutes).
+# Fix: read ftest chi2_reduced from cache; solutions already cached too.
+ftest = SimpleNamespace(**_cache["ftest"])
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 ks = ftest.k_values  # [1, 2, ..., 7]
@@ -285,7 +318,7 @@ plt.close(fig)
 # Figure 5 — Map: best-k clusters + velocity arrows
 # ═══════════════════════════════════════════════════════════════════════════════
 print(f"Plotting Fig 5: k={k_gap} cluster map (gap statistic) …")
-clusters_best = ftest.solutions[k_gap]   # cached — no re-clustering
+clusters_best = _load_solution(k_gap)
 
 fig, ax = plt.subplots(figsize=(16, 9),
                        subplot_kw={"projection": ccrs.Mercator()})
@@ -388,7 +421,7 @@ axes7 = axes7.flatten()
 
 for ax, k in zip(axes7, range(2, 8)):
     _basemap(ax)
-    clusters_k = ftest.solutions[k]     # cached — no re-clustering
+    clusters_k = _load_solution(k)
     all_clusters_k[k] = clusters_k
     for c in clusters_k:
         _scatter(ax, c.stations, color=CMAP(c.id - 1), s=10)
@@ -401,15 +434,23 @@ fig.savefig(OUT / "fig7_k2to7_clusters.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Figure 8 — Assignment entropy map at k = k_gap
-# High entropy = station is kinematically ambiguous (block boundary or
-# elastic loading near a locked fault).
+# Figure 8 — EM soft-assignment entropy map
+# Loaded from the JSON cache (computed by compute_anatolia_clusters.py).
+# EM entropy reflects genuine kinematic ambiguity — stations near block
+# boundaries get soft weights rather than a hard assignment, so their
+# entropy is elevated even when the hard clustering is confident.
 # ═══════════════════════════════════════════════════════════════════════════════
-print(f"Plotting Fig 8: assignment entropy map (k={k_gap}) …")
-from gps_cluster.domain.services.euler_math import assignment_probabilities
+# _cache already loaded at module top — no re-read needed.
+k_em   = _cache["em"]["k"]
+_em_entropy_by_name = {
+    r["name"]: r["em_entropy"]
+    for r in _cache["stations"]
+    if "em_entropy" in r
+}
+entropy     = np.array([_em_entropy_by_name.get(s.name, 0.0) for s in stations])
+max_entropy = np.log(k_em)   # theoretical maximum for k_em clusters
 
-probs, entropy = assignment_probabilities(stations, clusters_best)
-max_entropy = np.log(k_gap)   # theoretical maximum (uniform distribution)
+print(f"Plotting Fig 8: EM entropy map (k_em={k_em}) …")
 
 fig, ax = plt.subplots(figsize=(16, 8), subplot_kw={"projection": ccrs.Mercator()})
 _basemap(ax)
@@ -424,7 +465,7 @@ sc = ax.scatter(lons, lats,
                 transform=ccrs.PlateCarree(), zorder=4)
 
 cbar = fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02)
-cbar.set_label("Shannon entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
+cbar.set_label("EM soft-assignment entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
                fontsize=9)
 cbar.set_ticks([0, max_entropy / 2, max_entropy])
 cbar.set_ticklabels(["0\n(certain)", f"{max_entropy/2:.2f}",
@@ -445,13 +486,13 @@ if FAULT_FILE.exists():
 
 high_ent_pct = int(100 * np.mean(entropy > 0.5 * max_entropy))
 ax.set_title(
-    f"Assignment entropy — Euler-vector clustering k = {k_gap}  (ITRF14)\n"
+    f"EM soft-assignment entropy — k = {k_em}  (ITRF14)\n"
     f"Red = ambiguous (≥½ max entropy: {high_ent_pct}% of stations)   "
-    f"Green = certain   max entropy = log({k_gap}) = {max_entropy:.2f} nats",
+    f"Green = certain   max entropy = log({k_em}) = {max_entropy:.2f} nats",
     fontsize=11)
 fig.savefig(OUT / "fig8_entropy.png", dpi=180, bbox_inches="tight")
 plt.close(fig)
 
 print(f"\nAll figures saved to {OUT}/")
-print(f"  Mean entropy: {entropy.mean():.3f} / {max_entropy:.3f} nats  "
+print(f"  Mean EM entropy: {entropy.mean():.3f} / {max_entropy:.3f} nats  "
       f"({100*entropy.mean()/max_entropy:.0f}% of max)")
