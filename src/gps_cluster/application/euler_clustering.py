@@ -45,6 +45,7 @@ from gps_cluster.domain.services.euler_math import (
     invert_euler_vector,
     invert_euler_vector_weighted,
     soft_weights_from_euler_map,
+    spatial_soft_weights,
     total_chi_squared,
     unweighted_residual_sq,
     weighted_residual_sq,  # kept for chi² bookkeeping; not used in Savage reassignment
@@ -626,6 +627,265 @@ def bootstrap_pole_uncertainty(
     if len(lats) < 10:
         return 0.0, 0.0, 0.0
     return float(np.std(lats)), float(np.std(lons)), float(np.std(rates))
+
+
+class SpatialBayesianEulerClustering:
+    """Fully Bayesian Euler-vector clustering with Potts spatial prior.
+
+    Extends the EM algorithm (EMEulerVectorClustering) to a Variational
+    Bayes EM (VBEM) that encodes the physical prior that tectonic blocks
+    are spatially coherent.
+
+    Model
+    -----
+    Likelihood:
+        p(v_i | z_i=k, ω_k) = N(G_i ω_k, Σ_i)   [Gaussian GPS errors]
+
+    Prior on cluster assignments — Potts model on Delaunay graph:
+        p(z | π, β) ∝ Π_i π_{z_i} · exp(β Σ_{(i,j)∈E} δ(z_i, z_j))
+        where E is the Delaunay edge set and β is the spatial coupling.
+
+    Prior on Euler vectors:
+        p(ω_k) ∝ 1  (flat/improper) → posterior is Gaussian N(ω̂_k, C_k)
+        where ω̂_k is the WLS estimate and C_k its covariance.
+
+    Prior on mixing proportions:
+        p(π) = Dir(α, …, α),  α = 1  (uniform)
+
+    Inference — mean-field Variational Bayes
+    ----------------------------------------
+    Approximate posterior: q(z) = Π_i q_i(z_i)
+
+    E-step (inner loop until convergence):
+        log q_i(k) = -χ²_{ik}/2 + log π̂_k + β Σ_{j∈N(i)} q_j(k)
+        normalise each row to sum to 1.
+
+    M-step:
+        ω̂_k, C_k  = weighted WLS with weights w_{ik}/σ_i²
+        π̂_k       = (α + Σ_i w_{ik}) / (Kα + N)     [Dirichlet posterior]
+
+    The spatial term β Σ_{j∈N(i)} q_j(k) is the mean-field approximation
+    to the Potts log-prior: it rewards assigning station i to cluster k
+    when its Delaunay neighbours are also in k.  At β = 0 this reduces
+    exactly to the existing EMEulerVectorClustering.
+
+    Parameters
+    ----------
+    beta:
+        Spatial coupling strength.  β = 0 → pure kinematic EM.
+        β = 1 → each geographic neighbour in cluster k adds 1 nat;
+        balanced with ~6 Delaunay neighbours and inter-block χ²/2 ≈ 10.
+        Physically meaningful range: [0.5, 3.0].
+    max_iter:
+        Maximum outer VB-EM iterations.
+    tol:
+        Outer convergence tolerance on max element-wise weight change.
+    inner_tol / inner_max_iter:
+        Convergence parameters for the E-step inner loop.
+    n_restarts:
+        Passed to the hard-clustering initialiser (multiscale).
+    random_seed:
+        Seed for multiscale initialiser random restarts.
+    min_weight_sum:
+        Minimum effective station count per cluster (Σ_i w_{ik}) needed
+        to attempt a WLS inversion; below this the Euler vector is zeroed.
+    """
+
+    def __init__(
+        self,
+        beta: float = 1.0,
+        max_iter: int = 100,
+        tol: float = 1e-4,
+        inner_tol: float = 1e-4,
+        inner_max_iter: int = 30,
+        n_restarts: int = 20,
+        random_seed: int = 0,
+        min_weight_sum: float = 2.0,
+    ) -> None:
+        self.beta = beta
+        self.max_iter = max_iter
+        self.tol = tol
+        self.inner_tol = inner_tol
+        self.inner_max_iter = inner_max_iter
+        self.n_restarts = n_restarts
+        self.random_seed = random_seed
+        self.min_weight_sum = min_weight_sum
+        self._hard = EulerVectorClustering(
+            init="multiscale",
+            n_restarts=n_restarts,
+            random_seed=random_seed,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def cluster(
+        self,
+        stations: list[GpsStation],
+        k: int,
+    ) -> list[VelocityCluster]:
+        """Partition stations into k clusters via spatial VB-EM.
+
+        Returns
+        -------
+        list[VelocityCluster]
+            Hard-assigned clusters (argmax of final weight matrix) with:
+            - ``euler_vector`` : soft-weighted WLS estimate
+            - ``chi2`` / ``chi2_reduced`` : computed on hard-assigned members
+            - ``membership_weights`` : ndarray (N,) — VB posterior q_i(k)
+              for this cluster over *all* N stations.  Entropy of these
+              weights is now geophysically informative: elevated near
+              block boundaries and at strain-contaminated stations.
+        """
+        from gps_cluster.domain.services.spatial import (
+            adjacency_matrix,
+            delaunay_graph,
+        )
+
+        N = len(stations)
+
+        # ── Build Delaunay graph (once per cluster call) ─────────────────────
+        graph = delaunay_graph(stations)
+        adj   = adjacency_matrix(graph, N)
+
+        # ── Initialise from hard-assignment clustering ────────────────────────
+        # Multiscale init gives a physically reasonable starting point and
+        # avoids label-switching degeneracy of random VB initialisation.
+        hard_clusters = self._hard.cluster(stations, k)
+        euler_map: dict[int, EulerVector] = {
+            c.id: c.euler_vector
+            for c in hard_clusters
+            if c.euler_vector is not None
+        }
+        # Fill any empty clusters with zero vector
+        for cid in range(1, k + 1):
+            if cid not in euler_map:
+                euler_map[cid] = EulerVector(0.0, 0.0, 0.0)
+
+        # Mixing proportions: initialise from hard cluster sizes
+        pi = np.array([
+            next((c.size for c in hard_clusters if c.id == cid), 1)
+            for cid in range(1, k + 1)
+        ], dtype=float)
+        pi /= pi.sum()
+
+        # ── VB-EM outer loop ──────────────────────────────────────────────────
+        weights: np.ndarray | None = None
+
+        for _outer in range(self.max_iter):
+            # E-step: mean-field update with spatial prior
+            w_new = spatial_soft_weights(
+                stations, euler_map, adj,
+                beta=self.beta, pi=pi,
+                tol=self.inner_tol, max_inner=self.inner_max_iter,
+            )
+
+            # M-step: weighted WLS per cluster
+            new_euler_map: dict[int, EulerVector] = {}
+            for j, cid in enumerate(sorted(euler_map.keys())):
+                w_j = w_new[:, j]
+                if w_j.sum() >= self.min_weight_sum:
+                    new_euler_map[cid] = invert_euler_vector_weighted(stations, w_j)
+                else:
+                    new_euler_map[cid] = EulerVector(0.0, 0.0, 0.0)
+
+            # Update mixing proportions (Dirichlet posterior, α = 1)
+            pi = (w_new.sum(axis=0) + 1.0) / (N + k)
+
+            # Convergence check on weight matrix
+            if weights is not None and np.max(np.abs(w_new - weights)) < self.tol:
+                weights = w_new
+                euler_map = new_euler_map
+                break
+
+            weights = w_new
+            euler_map = new_euler_map
+
+        if weights is None:
+            weights = w_new  # type: ignore[possibly-undefined]
+
+        # ── Build output clusters ─────────────────────────────────────────────
+        labels = np.argmax(weights, axis=1) + 1   # 1-indexed hard assignment
+        return self._build_clusters(stations, labels, k, euler_map, weights)
+
+    def find_optimal_k(
+        self,
+        stations: list[GpsStation],
+        max_k: int = 9,
+        alpha: float = 0.05,
+    ) -> tuple[int, FTestResult]:
+        """Return (optimal_k, FTestResult) using F-test on VB-EM chi².
+
+        Runs full spatial VB-EM for k = 1..max_k.  Hard-assigned chi² is
+        used for the F-test so results are comparable with the hard and
+        plain-EM clusterers.
+        """
+        n_total = len(stations)
+        chi2_vals = np.zeros(max_k)
+        solutions: dict[int, list[VelocityCluster]] = {}
+
+        for ki, k in enumerate(range(1, max_k + 1)):
+            clusters = self.cluster(stations, k)
+            solutions[k] = clusters
+            chi2_vals[ki] = _total_chi2_static(clusters)
+
+        dof = np.array([max(2 * n_total - 3 * k, 1) for k in range(1, max_k + 1)])
+        chi2_red = chi2_vals / dof
+
+        f_stats = np.zeros(max_k - 1)
+        p_vals  = np.zeros(max_k - 1)
+        for i in range(max_k - 1):
+            delta = chi2_vals[i] - chi2_vals[i + 1]
+            if chi2_vals[i + 1] > 0:
+                f_stats[i] = delta * dof[i + 1] / chi2_vals[i + 1] / 3
+            p_vals[i] = 1.0 - f_dist.cdf(f_stats[i], dfn=3, dfd=dof[i + 1])
+
+        optimal_k = max_k
+        for i, p in enumerate(p_vals):
+            if p >= alpha:
+                optimal_k = i + 1
+                break
+
+        return optimal_k, FTestResult(
+            k_values=np.arange(1, max_k + 1),
+            chi2_total=chi2_vals,
+            chi2_reduced=chi2_red,
+            f_statistics=f_stats,
+            p_values=p_vals,
+            solutions=solutions,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_clusters(
+        self,
+        stations: list[GpsStation],
+        labels: np.ndarray,
+        k: int,
+        euler_map: dict[int, EulerVector],
+        weights: np.ndarray,
+    ) -> list[VelocityCluster]:
+        from gps_cluster.domain.services.euler_math import reduced_chi_squared
+        clusters = []
+        for j, cid in enumerate(range(1, k + 1)):
+            members = [s for s, lbl in zip(stations, labels) if lbl == cid]
+            euler   = euler_map.get(cid)
+            if euler is not None and euler.ox == 0 and euler.oy == 0 and euler.oz == 0:
+                euler = None if len(members) < 2 else euler
+            chi2     = total_chi_squared(members, euler) if euler and members else None
+            chi2_red = reduced_chi_squared(members, euler) if euler and members else None
+            clusters.append(VelocityCluster(
+                id=cid,
+                stations=members,
+                euler_vector=euler,
+                chi2=chi2,
+                chi2_reduced=chi2_red,
+                membership_weights=weights[:, j].copy(),
+            ))
+        return clusters
 
 
 def _total_chi2_static(clusters: list[VelocityCluster]) -> float:
