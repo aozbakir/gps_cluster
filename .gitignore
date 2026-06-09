@@ -57,6 +57,7 @@ data/*
 results/*
 scripts/*
 references/*
+docs/*
 
 # Reference PDFs / images — large binaries, keep out of git history
 docs/references/*
