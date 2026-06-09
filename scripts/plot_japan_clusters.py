@@ -9,7 +9,7 @@ Generates:
   Fig 6 — Map: k=3 clusters, residual vectors (observed − predicted)
   Fig 7 — Cluster comparison grid: k = 2, 3, 4, 5
 
-All figures saved to reports/figures/.
+All figures saved to results/figures/.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from gps_cluster.infrastructure.readers.velocity_csv import read_velocity_file
 # ── paths ────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data/external/gji_4600_SI_TablesS1.csv"
-OUT  = ROOT / "reports/figures"
+OUT  = ROOT / "results/figures"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── load data ─────────────────────────────────────────────────────────────────

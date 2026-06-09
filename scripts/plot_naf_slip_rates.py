@@ -1,6 +1,6 @@
 """NAF slip rate profile — strike-slip and fault-normal vs. longitude.
 
-Uses cached k=5 clusters (reports/anatolia/clusters.json).
+Uses cached k=5 clusters (results/anatolia/clusters.json).
 Cluster sides determined at each fault point via assign_sides(), consistent
 with plot_anatolia_slip_rates.py.  Sign convention from euler_math:
   strike_slip > 0  → right-lateral (dextral)
@@ -21,8 +21,8 @@ from gps_cluster.domain.services.euler_math import EulerVector, fault_slip_rate
 from gps_cluster.domain.services.fault_analysis import assign_sides
 
 ROOT  = Path(__file__).parent.parent
-CACHE = ROOT / "reports/anatolia/clusters.json"
-OUT   = ROOT / "reports/anatolia"
+CACHE = ROOT / "results/anatolia/clusters.json"
+OUT   = ROOT / "results/anatolia"
 
 if not CACHE.exists():
     raise FileNotFoundError(f"{CACHE} — run compute_anatolia_clusters.py first")

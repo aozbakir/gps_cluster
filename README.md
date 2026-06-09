@@ -34,7 +34,7 @@ clusters = evc.cluster(stations, k=3)
 
 ```bash
 python scripts/plot_japan_clusters.py
-# → reports/figures/fig1..fig8
+# → results/figures/fig1..fig8
 ```
 
 ## Tests

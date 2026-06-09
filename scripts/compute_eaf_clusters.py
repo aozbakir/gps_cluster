@@ -1,6 +1,6 @@
 """Compute Euler-vector clustering for the EAF region (k=2..6) and write JSON cache.
 
-Output: reports/eaf/clusters.json
+Output: results/eaf/clusters.json
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from gps_cluster.infrastructure.readers.velocity_vel import read_vel_file
 
 ROOT   = Path(__file__).parent.parent
 DATA   = ROOT / "data/external/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
-OUT    = ROOT / "reports/eaf"
+OUT    = ROOT / "results/eaf"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)
 

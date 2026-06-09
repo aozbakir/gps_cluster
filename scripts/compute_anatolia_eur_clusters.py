@@ -5,7 +5,7 @@ Runs both the Savage (2018) hard-assignment algorithm and the new
 EM soft-assignment extension.
 
 Input:  data/external/gnss_vel_euro_kurt2022.dat  (lon lat ve vn se sn)
-Output: reports/anatolia_eur/clusters.json
+Output: results/anatolia_eur/clusters.json
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from gps_cluster.infrastructure.readers.velocity_dat import read_dat_file
 
 ROOT   = Path(__file__).parent.parent
 DATA   = ROOT / "data/external/gnss_vel_euro_kurt2022.dat"
-OUT    = ROOT / "reports/anatolia_eur"
+OUT    = ROOT / "results/anatolia_eur"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)
 

@@ -1,6 +1,6 @@
 """Fault slip rates for Anatolia — circles on fault traces coloured by rake.
 
-Reads pre-computed clusters from reports/anatolia/clusters.json.
+Reads pre-computed clusters from results/anatolia/clusters.json.
 Run compute_anatolia_clusters.py first if the cache is missing.
 
 Rake is computed from the relative Euler velocity resolved onto the local
@@ -37,9 +37,9 @@ from gps_cluster.domain.services.fault_analysis import (
 )
 
 ROOT       = Path(__file__).parent.parent
-CACHE      = ROOT / "reports/anatolia/clusters.json"
+CACHE      = ROOT / "results/anatolia/clusters.json"
 FAULT_FILE = Path("/Users/ali/Repos/StrainTool/bin/mta_emme_fault_map.shp")
-OUT        = ROOT / "reports/anatolia"
+OUT        = ROOT / "results/anatolia"
 OUT.mkdir(parents=True, exist_ok=True)
 
 EXTENT = [25.0, 45.5, 35.5, 43.0]

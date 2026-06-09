@@ -54,6 +54,9 @@ MANIFEST
 
 # Data and Results
 data/*
-reports/*
+results/*
 scripts/*
 references/*
+
+# Reference PDFs / images — large binaries, keep out of git history
+docs/references/*

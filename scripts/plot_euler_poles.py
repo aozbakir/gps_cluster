@@ -28,8 +28,8 @@ from gps_cluster.domain.services.euler_math import (
 )
 
 ROOT   = Path(__file__).parent.parent
-CACHE  = ROOT / "reports/anatolia/clusters.json"
-OUT    = ROOT / "reports/anatolia"
+CACHE  = ROOT / "results/anatolia/clusters.json"
+OUT    = ROOT / "results/anatolia"
 
 K_OPT  = 5
 CMAP   = plt.colormaps["tab10"]

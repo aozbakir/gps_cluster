@@ -12,7 +12,7 @@ Generates:
   Fig 6 — Map: residual vectors (observed − Euler-predicted)
   Fig 7 — Cluster comparison grid: k = 2..7
 
-All figures saved to reports/anatolia/.
+All figures saved to results/anatolia/.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ from gps_cluster.domain.services.euler_math import (
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent.parent
-CACHE      = ROOT / "reports/anatolia/clusters.json"
+CACHE      = ROOT / "results/anatolia/clusters.json"
 FAULT_FILE = ROOT / "data/raw/anatolia_slip_rate_faults_simplified.geojson"
-OUT        = ROOT / "reports/anatolia"
+OUT        = ROOT / "results/anatolia"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── load cache ────────────────────────────────────────────────────────────────

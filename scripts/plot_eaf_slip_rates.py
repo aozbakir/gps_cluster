@@ -1,6 +1,6 @@
 """EAF region — fault slip rates for k=2, 3, 4 as three subplots.
 
-Reads reports/eaf/clusters.json.  Run compute_eaf_clusters.py first.
+Reads results/eaf/clusters.json.  Run compute_eaf_clusters.py first.
 
 For each k, only faults that lie on a cluster boundary produce circles.
 Same-cluster faults are silently skipped (same-cluster guard).
@@ -34,9 +34,9 @@ from gps_cluster.domain.services.fault_analysis import (
 )
 
 ROOT       = Path(__file__).parent.parent
-CACHE      = ROOT / "reports/eaf/clusters.json"
+CACHE      = ROOT / "results/eaf/clusters.json"
 FAULT_FILE = Path("/Users/ali/Repos/StrainTool/bin/mta_emme_fault_map.shp")
-OUT        = ROOT / "reports/eaf"
+OUT        = ROOT / "results/eaf"
 
 EXTENT = [34.0, 42.0, 36.0, 39.0]
 K_LIST = [2]

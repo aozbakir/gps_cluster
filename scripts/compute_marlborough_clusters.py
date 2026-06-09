@@ -3,7 +3,7 @@
 Run this once (takes ~5 min with 50 restarts).  The JSON cache is then
 read by plot_marlborough_clusters.py for fast, compute-free plotting.
 
-Output: reports/marlborough/clusters.json
+Output: results/marlborough/clusters.json
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from gps_cluster.infrastructure.readers.velocity_csv_nz import read_nz_csv
 
 ROOT   = Path(__file__).parent.parent
 DATA   = ROOT / "data/external/nz_velocities.csv"
-OUT    = ROOT / "reports/marlborough"
+OUT    = ROOT / "results/marlborough"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)
 
