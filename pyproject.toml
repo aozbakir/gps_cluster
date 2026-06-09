@@ -31,6 +31,21 @@ dev = [
 [project.scripts]
 gps-cluster = "gps_cluster.interfaces.cli:cli"
 
+[tool.setuptools.package-dir]
+gps_cluster = "src"
+
+[tool.setuptools]
+packages = [
+    "gps_cluster",
+    "gps_cluster.application",
+    "gps_cluster.domain",
+    "gps_cluster.domain.services",
+    "gps_cluster.infrastructure",
+    "gps_cluster.infrastructure.readers",
+    "gps_cluster.infrastructure.visualization",
+    "gps_cluster.interfaces",
+]
+
 [tool.setuptools_scm]
 # See configuration details in https://github.com/pypa/setuptools_scm
 version_scheme = "no-guess-dev"
