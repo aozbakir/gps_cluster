@@ -77,6 +77,58 @@ def _obs_and_weights(
     return d, W
 
 
+def invert_euler_vector_weighted(
+    stations: list[GpsStation],
+    weights: "np.ndarray",
+) -> EulerVector:
+    """Soft-weighted least-squares Euler vector inversion.
+
+    Each station i contributes to the normal equations with weight ``weights[i]``
+    on top of the measurement precision weights ``1/sigma²``.  This is the M-step
+    of the EM algorithm: stations near block boundaries (low ``weights[i]``) pull
+    less on the Euler vector estimate.
+
+    Parameters
+    ----------
+    stations:
+        Full list of GPS stations (length N).
+    weights:
+        1-D array of shape (N,) with non-negative soft-assignment probabilities
+        for this cluster.  Need not sum to 1.
+
+    Returns
+    -------
+    EulerVector with covariance attached.
+    """
+    weights = np.asarray(weights, dtype=float)
+    if weights.sum() < 1e-12:
+        return EulerVector(0.0, 0.0, 0.0)
+
+    G = design_matrix(stations)               # (2N, 3)
+    d = np.array([v for s in stations for v in (s.velocity.ve, s.velocity.vn)])
+    sigmas = np.array([v for s in stations for v in (s.velocity.se, s.velocity.sn)])
+
+    # Expand per-station weights to per-observation (east, north pairs)
+    w_obs = np.repeat(weights, 2) / sigmas**2  # shape (2N,)
+
+    W = np.diag(w_obs)
+    GtW = G.T @ W
+    GtWG = GtW @ G
+    try:
+        omega = np.linalg.solve(GtWG, GtW @ d)
+    except np.linalg.LinAlgError:
+        return EulerVector(0.0, 0.0, 0.0)
+
+    # Covariance: (G^T W G)^{-1} — same formula, now W carries soft weights
+    try:
+        C = np.linalg.inv(GtWG)
+    except np.linalg.LinAlgError:
+        C = None
+
+    return EulerVector(ox=float(omega[0]), oy=float(omega[1]), oz=float(omega[2]),
+                       covariance=C)
+
+
 def invert_euler_vector(stations: list[GpsStation]) -> EulerVector:
     """Weighted least-squares Euler vector inversion.
 
@@ -98,7 +150,8 @@ def invert_euler_vector(stations: list[GpsStation]) -> EulerVector:
     except np.linalg.LinAlgError as exc:
         raise ValueError("Design matrix is singular; check station geometry") from exc
 
-    return EulerVector(ox=float(omega[0]), oy=float(omega[1]), oz=float(omega[2]))
+    C = np.linalg.inv(GtW @ G)   # 3×3 covariance in (mm/yr)²
+    return EulerVector(ox=float(omega[0]), oy=float(omega[1]), oz=float(omega[2]), covariance=C)
 
 
 def predict_velocity(station: GpsStation, euler: EulerVector) -> tuple[float, float]:
@@ -149,6 +202,63 @@ def reduced_chi_squared(stations: list[GpsStation], euler: EulerVector) -> float
     return chi2 / (2 * n - 3)
 
 
+def euler_pole_uncertainty(euler: EulerVector) -> tuple[float, float, float]:
+    """Propagate Euler vector covariance to pole (lat, lon, rate) 1-sigma uncertainties.
+
+    Uses first-order error propagation: C_pole = J @ C_omega @ J^T
+    where J is the 3×3 Jacobian d(lat,lon,rate)/d(ox,oy,oz).
+
+    Returns
+    -------
+    (sigma_lat_deg, sigma_lon_deg, sigma_rate_deg_myr)
+    All in degrees / degrees / deg per Myr.
+    Returns (0,0,0) if covariance is not set.
+    """
+    if euler.covariance is None:
+        return (0.0, 0.0, 0.0)
+
+    ox, oy, oz = euler.ox, euler.oy, euler.oz
+    magnitude = np.sqrt(ox**2 + oy**2 + oz**2)
+    if magnitude == 0.0:
+        return (0.0, 0.0, 0.0)
+
+    r_xy = np.sqrt(ox**2 + oy**2)
+    if r_xy == 0.0:
+        return (0.0, 0.0, 0.0)   # pole at geographic pole — degenerate
+
+    # Jacobian rows: d(lat)/d(omega), d(lon)/d(omega), d(rate)/d(omega)
+    # lat = arcsin(oz / magnitude)
+    dlat_dox = -ox * oz / (magnitude**2 * r_xy)
+    dlat_doy = -oy * oz / (magnitude**2 * r_xy)
+    dlat_doz =  r_xy / magnitude**2
+    # lon = atan2(oy, ox)
+    dlon_dox = -oy / r_xy**2
+    dlon_doy =  ox / r_xy**2
+    dlon_doz =  0.0
+    # rate = degrees(magnitude / R) * 1e6  => d(rate)/d(omega) in (deg/Myr)/(mm/yr)
+    drate_dox = ox / (magnitude * _EARTH_RADIUS_MM)
+    drate_doy = oy / (magnitude * _EARTH_RADIUS_MM)
+    drate_doz = oz / (magnitude * _EARTH_RADIUS_MM)
+
+    J = np.array([
+        [dlat_dox, dlat_doy, dlat_doz],
+        [dlon_dox, dlon_doy, dlon_doz],
+        [drate_dox, drate_doy, drate_doz],
+    ])  # shape (3, 3)
+
+    C_pole = J @ euler.covariance @ J.T   # (3, 3)
+
+    # lat and lon Jacobian rows give result in radians; convert to degrees
+    rad_to_deg = np.degrees(1.0)
+    yr_to_myr = 1e6
+
+    sigma_lat  = rad_to_deg * np.sqrt(max(C_pole[0, 0], 0.0))
+    sigma_lon  = rad_to_deg * np.sqrt(max(C_pole[1, 1], 0.0))
+    sigma_rate = rad_to_deg * yr_to_myr * np.sqrt(max(C_pole[2, 2], 0.0))
+
+    return (sigma_lat, sigma_lon, sigma_rate)
+
+
 def euler_vector_to_pole(euler: EulerVector) -> EulerPole:
     """Convert Cartesian Omega to geographic Euler pole (lat, lon, rate in deg/Myr)."""
     ox, oy, oz = euler.ox, euler.oy, euler.oz
@@ -159,7 +269,9 @@ def euler_vector_to_pole(euler: EulerVector) -> EulerPole:
     lat = float(np.degrees(np.arcsin(np.clip(oz / magnitude, -1.0, 1.0))))
     # magnitude [mm/yr] / R_earth [mm] = angular rate [rad/yr]; convert to deg/Myr
     rate = float(np.degrees(magnitude / _EARTH_RADIUS_MM) * 1e6)
-    return EulerPole(lat=lat, lon=lon, rate=rate)
+    sigma_lat, sigma_lon, sigma_rate = euler_pole_uncertainty(euler)
+    return EulerPole(lat=lat, lon=lon, rate=rate,
+                     sigma_lat=sigma_lat, sigma_lon=sigma_lon, sigma_rate=sigma_rate)
 
 
 def euler_pole_to_vector(pole: EulerPole) -> EulerVector:
@@ -172,6 +284,225 @@ def euler_pole_to_vector(pole: EulerPole) -> EulerVector:
         oy=float(omega_mag * np.cos(phi) * np.sin(lam)),
         oz=float(omega_mag * np.sin(phi)),
     )
+
+
+def fault_slip_rate(
+    euler_a: EulerVector,
+    euler_b: EulerVector,
+    fault_lats: list[float],
+    fault_lons: list[float],
+    fault_strike_deg: float | None = None,
+) -> list[dict]:
+    """Compute fault slip rate at points along a fault from two adjacent block Euler vectors.
+
+    The relative angular velocity is omega_rel = omega_b - omega_a, giving the
+    velocity of block B relative to block A at each fault point.
+
+    Parameters
+    ----------
+    euler_a, euler_b:
+        Euler vectors of the two blocks on either side of the fault.
+    fault_lats, fault_lons:
+        Sampling points along the fault trace.
+    fault_strike_deg:
+        Along-fault azimuth (degrees CW from N). If provided, decompose the
+        relative velocity into fault-parallel (strike-slip) and fault-normal
+        (opening/convergence) components. If None, only total rate is returned.
+
+    Returns
+    -------
+    List of dicts, one per fault point, with keys:
+        lat, lon, ve_rel, vn_rel, total_mm_yr,
+        strike_slip_mm_yr (+ = right-lateral),
+        fault_normal_mm_yr (+ = opening)
+    """
+    omega_rel = EulerVector(
+        ox=euler_b.ox - euler_a.ox,
+        oy=euler_b.oy - euler_a.oy,
+        oz=euler_b.oz - euler_a.oz,
+    )
+
+    results = []
+    for lat, lon in zip(fault_lats, fault_lons):
+        r = _unit_position(lat, lon)
+        e = _local_east(lon)
+        n = _local_north(lat, lon)
+        om = omega_rel.to_array()
+
+        ve = float(np.dot(om, np.cross(r, e)))
+        vn = float(np.dot(om, np.cross(r, n)))
+        total = float(np.sqrt(ve**2 + vn**2))
+
+        entry: dict = dict(lat=lat, lon=lon, ve_rel=ve, vn_rel=vn,
+                           total_mm_yr=total)
+
+        if fault_strike_deg is not None:
+            # Rotate velocity into fault-parallel / fault-normal frame
+            # strike = azimuth of fault (CW from N)
+            strike_rad = np.radians(fault_strike_deg)
+            # fault-parallel unit vector (along strike, pointing in strike direction)
+            fp_e =  np.sin(strike_rad)
+            fp_n =  np.cos(strike_rad)
+            # fault-normal unit vector (90° CCW from strike = left of travel)
+            fn_e = -np.cos(strike_rad)
+            fn_n =  np.sin(strike_rad)
+
+            strike_slip   = ve * fp_e + vn * fp_n   # +ve = right-lateral
+            fault_normal  = ve * fn_e + vn * fn_n   # +ve = opening
+
+            entry["strike_slip_mm_yr"]  = float(strike_slip)
+            entry["fault_normal_mm_yr"] = float(fault_normal)
+
+        results.append(entry)
+
+    return results
+
+
+def fault_slip_rate_uncertainty(
+    euler_a: EulerVector,
+    euler_b: EulerVector,
+    lat: float,
+    lon: float,
+    fault_strike_deg: float,
+) -> dict:
+    """1-sigma uncertainty on strike-slip and fault-normal rates at a fault point.
+
+    Assumes the two block Euler vectors are independent (uncorrelated), so
+    C_rel = C_a + C_b.  Propagates through the linear velocity decomposition.
+
+    Returns
+    -------
+    dict with keys:
+        sigma_strike_slip_mm_yr, sigma_fault_normal_mm_yr, sigma_total_mm_yr
+    Returns zeros if neither euler has a covariance set.
+    """
+    if euler_a.covariance is None and euler_b.covariance is None:
+        return dict(sigma_strike_slip_mm_yr=0.0,
+                    sigma_fault_normal_mm_yr=0.0,
+                    sigma_total_mm_yr=0.0)
+
+    C_a = euler_a.covariance if euler_a.covariance is not None else np.zeros((3, 3))
+    C_b = euler_b.covariance if euler_b.covariance is not None else np.zeros((3, 3))
+    C_rel = C_a + C_b
+
+    r = _unit_position(lat, lon)
+    e = _local_east(lon)
+    n = _local_north(lat, lon)
+
+    # Design matrix rows for this point: G_e = r×e, G_n = r×n  (both 3-vectors)
+    G_e = np.cross(r, e)   # ∂ve_rel/∂omega_rel
+    G_n = np.cross(r, n)   # ∂vn_rel/∂omega_rel
+
+    strike_rad = np.radians(fault_strike_deg)
+    fp_e =  np.sin(strike_rad)
+    fp_n =  np.cos(strike_rad)
+    fn_e = -np.cos(strike_rad)
+    fn_n =  np.sin(strike_rad)
+
+    # Sensitivity of ss and fn to omega_rel (1×3 row vectors)
+    J_ss = fp_e * G_e + fp_n * G_n   # ∂ss/∂omega_rel
+    J_fn = fn_e * G_e + fn_n * G_n   # ∂fn/∂omega_rel
+
+    # Total rate direction sensitivity
+    omega_rel = np.array([euler_b.ox - euler_a.ox,
+                           euler_b.oy - euler_a.oy,
+                           euler_b.oz - euler_a.oz])
+    ve_rel = float(np.dot(omega_rel, G_e))
+    vn_rel = float(np.dot(omega_rel, G_n))
+    total  = np.sqrt(ve_rel**2 + vn_rel**2)
+    if total > 0:
+        J_tot = (ve_rel * G_e + vn_rel * G_n) / total
+    else:
+        J_tot = np.zeros(3)
+
+    sigma_ss  = np.sqrt(max(float(J_ss @ C_rel @ J_ss), 0.0))
+    sigma_fn  = np.sqrt(max(float(J_fn @ C_rel @ J_fn), 0.0))
+    sigma_tot = np.sqrt(max(float(J_tot @ C_rel @ J_tot), 0.0))
+
+    return dict(sigma_strike_slip_mm_yr=sigma_ss,
+                sigma_fault_normal_mm_yr=sigma_fn,
+                sigma_total_mm_yr=sigma_tot)
+
+
+def assignment_probabilities(
+    stations: list[GpsStation],
+    clusters: list,            # list of VelocityCluster (or any object with .euler_vector)
+) -> tuple[np.ndarray, np.ndarray]:
+    """Soft cluster membership probabilities for each station.
+
+    Uses the chi² residual under each cluster's Euler vector as a
+    log-likelihood:
+
+        log P(station s → cluster j) ∝ -χ²_j(s) / 2
+
+    Converted to probabilities via softmax:
+
+        P(s, j) = exp(-χ²_j / 2) / Σ_k exp(-χ²_k / 2)
+
+    This is the Bayesian posterior under equal priors and Gaussian
+    measurement errors.  High-entropy stations (H = -Σ p·log p ≈ log k)
+    are kinematically ambiguous — they lie near block boundaries or carry
+    elastic strain signals from locked faults.
+
+    Parameters
+    ----------
+    stations : list of GpsStation
+    clusters : list of objects with .euler_vector (EulerVector | None)
+
+    Returns
+    -------
+    probs : ndarray shape (N, k)
+        Probability matrix; probs[i, j] = P(station i → cluster j).
+    entropy : ndarray shape (N,)
+        Shannon entropy per station in nats.  Max = log(k) (fully uncertain).
+    """
+    valid = [c for c in clusters if c.euler_vector is not None]
+    N  = len(stations)
+    k  = len(valid)
+    chi2_mat = np.zeros((N, k))
+
+    for j, c in enumerate(valid):
+        for i, s in enumerate(stations):
+            chi2_mat[i, j] = weighted_residual_sq(s, c.euler_vector)
+
+    # Softmax over -chi²/2 (subtract row max for numerical stability)
+    log_p = -0.5 * chi2_mat
+    log_p -= log_p.max(axis=1, keepdims=True)
+    p = np.exp(log_p)
+    p /= p.sum(axis=1, keepdims=True)
+
+    # Shannon entropy per station (nats)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ent = -np.nansum(p * np.where(p > 0, np.log(p), 0.0), axis=1)
+
+    return p, ent
+
+
+def soft_weights_from_euler_map(
+    stations: list[GpsStation],
+    euler_map: dict,      # {cluster_id: EulerVector}
+) -> np.ndarray:
+    """Compute soft assignment weight matrix from an euler_map dict.
+
+    Returns
+    -------
+    weights : ndarray shape (N, k)
+        weights[i, j] = P(station i → cluster j), via softmax over -χ²/2.
+    """
+    cluster_ids = sorted(euler_map)
+    N = len(stations)
+    k = len(cluster_ids)
+    chi2_mat = np.zeros((N, k))
+    for j, cid in enumerate(cluster_ids):
+        ev = euler_map[cid]
+        for i, s in enumerate(stations):
+            chi2_mat[i, j] = weighted_residual_sq(s, ev)
+
+    log_p = -0.5 * chi2_mat
+    log_p -= log_p.max(axis=1, keepdims=True)
+    p = np.exp(log_p)
+    p /= p.sum(axis=1, keepdims=True)
+    return p   # (N, k)
 
 
 def euler_angular_distance(a: EulerVector, b: EulerVector) -> float:

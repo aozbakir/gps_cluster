@@ -33,6 +33,21 @@ def remove_outliers(
     return [s for s, ze_i, zn_i in zip(stations, ze, zn) if ze_i <= zscore_threshold and zn_i <= zscore_threshold]
 
 
+def filter_by_extent(
+    stations: list[GpsStation],
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+) -> list[GpsStation]:
+    """Return only stations whose position falls within the given bounding box."""
+    return [
+        s for s in stations
+        if lon_min <= s.position.lon <= lon_max
+        and lat_min <= s.position.lat <= lat_max
+    ]
+
+
 def preprocess(
     stations: list[GpsStation],
     max_sigma: float = 0.6,

@@ -34,7 +34,7 @@ are sufficient.  Reject the null at p < alpha to prefer k+1.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
@@ -43,6 +43,8 @@ from scipy.stats import f as f_dist
 from gps_cluster.domain.entities import EulerVector, GpsStation, VelocityCluster
 from gps_cluster.domain.services.euler_math import (
     invert_euler_vector,
+    invert_euler_vector_weighted,
+    soft_weights_from_euler_map,
     total_chi_squared,
     unweighted_residual_sq,
     weighted_residual_sq,  # kept for chi² bookkeeping; not used in Savage reassignment
@@ -58,6 +60,20 @@ class FTestResult:
     chi2_reduced: np.ndarray
     f_statistics: np.ndarray  # length max_k - 1
     p_values: np.ndarray
+    solutions: dict = field(default_factory=dict)  # k → list[VelocityCluster]
+
+    @property
+    def k_elbow(self) -> int:
+        """k at which chi²_red drops the most (largest single-step improvement).
+
+        This is the 'elbow' of the chi²_red vs k curve — a useful complement
+        to the F-test optimal k when the curve is shallow and the F-test keeps
+        adding clusters past the obvious knee.
+        """
+        if len(self.chi2_reduced) < 2:
+            return int(self.k_values[0])
+        improvement = -np.diff(self.chi2_reduced)   # positive = improvement
+        return int(self.k_values[1:][np.argmax(improvement)])
 
 
 class EulerVectorClustering:
@@ -142,8 +158,8 @@ class EulerVectorClustering:
             labels = self._multiscale_init(stations, k)
         else:
             labels = self._initial_labels(stations, k)
-        labels = self._iterate(stations, labels, k)
-        return self._build_clusters(stations, labels, k)
+        labels, euler_map = self._iterate(stations, labels, k)
+        return self._build_clusters(stations, labels, k, euler_map=euler_map)
 
     def find_optimal_k(
         self,
@@ -159,9 +175,11 @@ class EulerVectorClustering:
         """
         n_total = len(stations)
         chi2_vals = np.zeros(max_k)
+        solutions: dict[int, list[VelocityCluster]] = {}
 
         for ki, k in enumerate(range(1, max_k + 1)):
             clusters = self.cluster(stations, k)
+            solutions[k] = clusters
             chi2_vals[ki] = self._total_chi2(clusters)
 
         dof = np.array([max(2 * n_total - 3 * k, 1) for k in range(1, max_k + 1)])
@@ -189,6 +207,7 @@ class EulerVectorClustering:
             chi2_reduced=chi2_red,
             f_statistics=f_stats,
             p_values=p_vals,
+            solutions=solutions,
         )
         return optimal_k, result
 
@@ -254,8 +273,8 @@ class EulerVectorClustering:
         best_chi2 = np.inf
 
         for init_labels in self._candidate_inits(stations, k):
-            labels = self._iterate(stations, init_labels.copy(), k)
-            clusters = self._build_clusters(stations, labels, k)
+            labels, euler_map = self._iterate(stations, init_labels.copy(), k)
+            clusters = self._build_clusters(stations, labels, k, euler_map)
             chi2 = self._total_chi2(clusters)
             if chi2 < best_chi2:
                 best_chi2 = chi2
@@ -298,7 +317,7 @@ class EulerVectorClustering:
 
     def _iterate(
         self, stations: list[GpsStation], labels: np.ndarray, k: int
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, dict]:
         """Run inversion + reassignment until convergence."""
         for _ in range(self.max_iter):
             euler_map = self._euler_per_cluster(stations, labels, k)
@@ -306,22 +325,315 @@ class EulerVectorClustering:
             if np.array_equal(new_labels, labels):
                 break
             labels = new_labels
-        return labels
+        # Final inversion with converged labels
+        euler_map = self._euler_per_cluster(stations, labels, k)
+        return labels, euler_map
 
     def _build_clusters(
-        self, stations: list[GpsStation], labels: np.ndarray, k: int
+        self, stations: list[GpsStation], labels: np.ndarray, k: int,
+        euler_map: dict | None = None,
     ) -> list[VelocityCluster]:
+        from gps_cluster.domain.services.euler_math import reduced_chi_squared
+        if euler_map is None:
+            euler_map = self._euler_per_cluster(stations, labels, k)
         clusters = []
         for cid in range(1, k + 1):
             members = [s for s, lbl in zip(stations, labels) if lbl == cid]
-            euler = invert_euler_vector(members) if len(members) >= self.min_stations else None
-            clusters.append(VelocityCluster(id=cid, stations=members, euler_vector=euler))
+            euler = euler_map.get(cid) if len(members) >= self.min_stations else None
+            chi2 = total_chi_squared(members, euler) if euler is not None else None
+            chi2_red = reduced_chi_squared(members, euler) if euler is not None else None
+            clusters.append(VelocityCluster(
+                id=cid, stations=members, euler_vector=euler,
+                chi2=chi2, chi2_reduced=chi2_red,
+            ))
         return clusters
 
     @staticmethod
     def _total_chi2(clusters: list[VelocityCluster]) -> float:
         total = 0.0
         for c in clusters:
-            if c.euler_vector is not None and len(c.stations) > 0:
+            if c.chi2 is not None:
+                total += c.chi2
+            elif c.euler_vector is not None and len(c.stations) > 0:
                 total += total_chi_squared(c.stations, c.euler_vector)
         return total
+
+
+# ---------------------------------------------------------------------------
+# EM Euler-vector clustering
+# ---------------------------------------------------------------------------
+
+class EMEulerVectorClustering:
+    """Expectation-Maximisation Euler-vector clustering.
+
+    Extends the hard-assignment Savage (2018) algorithm to a proper EM loop:
+
+    E-step
+        Compute soft assignment probabilities w_{ij} = P(station i → cluster j)
+        via softmax over −χ²/2.  This is the exact Bayesian posterior under
+        Gaussian measurement errors and a uniform cluster prior.
+
+    M-step
+        Re-invert each Euler vector using *weighted* least squares, where each
+        station i contributes with weight ``w_{ij} / σ_i²``.  Stations near
+        block boundaries (high entropy) pull less on both adjacent Euler vectors,
+        reducing the elastic-loading bias of hard assignment.
+
+    The algorithm converges when the maximum element-wise change in the weight
+    matrix drops below ``tol``, or after ``max_iter`` iterations.
+
+    Initialization
+    --------------
+    The first E-step is seeded from the converged hard-assignment solution
+    (``EulerVectorClustering`` with ``init="multiscale"``), which provides a
+    physically reasonable starting point and avoids the label-switching
+    degeneracy of random EM initialization.
+
+    Parameters
+    ----------
+    max_iter : int
+        Maximum EM iterations (default 100).
+    tol : float
+        Convergence tolerance on the weight matrix (default 1e-4).
+    min_weight_sum : float
+        Minimum effective station count per cluster (sum of weights) needed to
+        attempt a WLS inversion.  Below this, the Euler vector is set to zero.
+    n_restarts : int
+        Passed to the hard-clustering initializer.
+    random_seed : int
+        Seed for the hard-clustering initializer.
+    """
+
+    def __init__(
+        self,
+        max_iter: int = 100,
+        tol: float = 1e-4,
+        min_weight_sum: float = 2.0,
+        n_restarts: int = 20,
+        random_seed: int = 0,
+    ) -> None:
+        self.max_iter = max_iter
+        self.tol = tol
+        self.min_weight_sum = min_weight_sum
+        self.n_restarts = n_restarts
+        self.random_seed = random_seed
+        # Hard-assignment clusterer used for initialization
+        self._hard = EulerVectorClustering(
+            init="multiscale",
+            n_restarts=n_restarts,
+            random_seed=random_seed,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API  (mirrors EulerVectorClustering)
+    # ------------------------------------------------------------------
+
+    def cluster(
+        self,
+        stations: list[GpsStation],
+        k: int,
+        init_labels: np.ndarray | None = None,
+    ) -> list[VelocityCluster]:
+        """Partition stations into k clusters via EM.
+
+        Returns
+        -------
+        list[VelocityCluster]
+            Hard-assigned clusters (argmax of final weight matrix), with:
+            - ``euler_vector`` estimated by soft-weighted WLS
+            - ``chi2`` / ``chi2_reduced`` computed on hard-assigned members
+            - ``membership_weights`` : ndarray shape (N,) — the column of the
+              final weight matrix for this cluster (over *all* stations)
+        """
+        N = len(stations)
+
+        # ── Initialization: seed weights from hard-assignment solution ──────
+        if init_labels is not None:
+            labels0 = np.asarray(init_labels, dtype=int)
+            euler_map = self._hard._euler_per_cluster(stations, labels0, k)
+        else:
+            hard_clusters = self._hard.cluster(stations, k)
+            labels0 = np.array([
+                next(c.id for c in hard_clusters if s in c.stations)
+                for s in stations
+            ], dtype=int)
+            euler_map = {c.id: c.euler_vector for c in hard_clusters
+                         if c.euler_vector is not None}
+
+        # One-hot initial weights from hard labels
+        weights = np.zeros((N, k), dtype=float)
+        for i, lbl in enumerate(labels0):
+            if 1 <= lbl <= k:
+                weights[i, lbl - 1] = 1.0
+
+        # ── EM loop ─────────────────────────────────────────────────────────
+        cluster_ids = list(range(1, k + 1))
+
+        for iteration in range(self.max_iter):
+            # M-step: re-invert each Euler vector with current soft weights
+            new_euler_map: dict[int, EulerVector] = {}
+            for j, cid in enumerate(cluster_ids):
+                w_j = weights[:, j]
+                if w_j.sum() >= self.min_weight_sum:
+                    new_euler_map[cid] = invert_euler_vector_weighted(stations, w_j)
+                else:
+                    new_euler_map[cid] = EulerVector(0.0, 0.0, 0.0)
+
+            # E-step: recompute soft weights from new Euler vectors
+            new_weights = soft_weights_from_euler_map(stations, new_euler_map)
+
+            # Convergence check
+            delta = float(np.max(np.abs(new_weights - weights)))
+            weights = new_weights
+            euler_map = new_euler_map
+            if delta < self.tol:
+                break
+
+        # ── Build output clusters via hard argmax ────────────────────────────
+        labels = np.argmax(weights, axis=1) + 1   # 1-indexed
+        return self._build_clusters(stations, labels, k, euler_map, weights)
+
+    def find_optimal_k(
+        self,
+        stations: list[GpsStation],
+        max_k: int = 9,
+        alpha: float = 0.05,
+    ) -> tuple[int, FTestResult]:
+        """Return (optimal_k, FTestResult) using F-test on hard-assigned chi².
+
+        Runs full EM for each k=1..max_k.  Hard-assigned chi² is used for the
+        F-test (same criterion as the Savage hard-assignment version) so the
+        results are directly comparable.
+        """
+        n_total = len(stations)
+        chi2_vals = np.zeros(max_k)
+        solutions: dict[int, list[VelocityCluster]] = {}
+
+        for ki, k in enumerate(range(1, max_k + 1)):
+            clusters = self.cluster(stations, k)
+            solutions[k] = clusters
+            chi2_vals[ki] = _total_chi2_static(clusters)
+
+        dof = np.array([max(2 * n_total - 3 * k, 1) for k in range(1, max_k + 1)])
+        chi2_red = chi2_vals / dof
+
+        f_stats = np.zeros(max_k - 1)
+        p_vals = np.zeros(max_k - 1)
+        for i in range(max_k - 1):
+            delta = chi2_vals[i] - chi2_vals[i + 1]
+            if chi2_vals[i + 1] > 0:
+                f_stats[i] = delta * dof[i + 1] / chi2_vals[i + 1] / 3
+            p_vals[i] = 1.0 - f_dist.cdf(f_stats[i], dfn=3, dfd=dof[i + 1])
+
+        optimal_k = max_k
+        for i, p in enumerate(p_vals):
+            if p >= alpha:
+                optimal_k = i + 1
+                break
+
+        result = FTestResult(
+            k_values=np.arange(1, max_k + 1),
+            chi2_total=chi2_vals,
+            chi2_reduced=chi2_red,
+            f_statistics=f_stats,
+            p_values=p_vals,
+            solutions=solutions,
+        )
+        return optimal_k, result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_clusters(
+        self,
+        stations: list[GpsStation],
+        labels: np.ndarray,       # 1-indexed, hard argmax
+        k: int,
+        euler_map: dict[int, EulerVector],
+        weights: np.ndarray,       # (N, k) full weight matrix
+    ) -> list[VelocityCluster]:
+        from gps_cluster.domain.services.euler_math import reduced_chi_squared
+        clusters = []
+        for j, cid in enumerate(range(1, k + 1)):
+            members = [s for s, lbl in zip(stations, labels) if lbl == cid]
+            euler = euler_map.get(cid)
+            if euler is not None and (euler.ox == 0 and euler.oy == 0 and euler.oz == 0
+                                      and len(members) < 2):
+                euler = None
+            chi2 = total_chi_squared(members, euler) if euler is not None and members else None
+            chi2_red = reduced_chi_squared(members, euler) if euler is not None and members else None
+            clusters.append(VelocityCluster(
+                id=cid,
+                stations=members,
+                euler_vector=euler,
+                chi2=chi2,
+                chi2_reduced=chi2_red,
+                membership_weights=weights[:, j].copy(),
+            ))
+        return clusters
+
+
+def bootstrap_pole_uncertainty(
+    stations: list[GpsStation],
+    n_boot: int = 300,
+    random_seed: int = 42,
+) -> tuple[float, float, float]:
+    """Bootstrap 1-sigma uncertainties on Euler pole (lat, lon, rate).
+
+    Resamples *stations* with replacement *n_boot* times, re-inverts the
+    Euler vector each time, and returns the standard deviation of the
+    resulting pole parameters.  This gives realistic uncertainties that
+    reflect block non-rigidity and uneven station distribution — unlike
+    the formal WLS covariance which is overoptimistic for large datasets.
+
+    Parameters
+    ----------
+    stations : list[GpsStation]
+        Stations belonging to a single cluster.
+    n_boot : int
+        Number of bootstrap resamples.
+    random_seed : int
+        Seed for the random number generator.
+
+    Returns
+    -------
+    (sigma_lat_deg, sigma_lon_deg, sigma_rate_deg_myr)
+        Bootstrap standard deviations.  Returns (0, 0, 0) if fewer than
+        10 valid resamples are obtained.
+    """
+    from gps_cluster.domain.services.euler_math import (
+        euler_vector_to_pole,
+        invert_euler_vector,
+    )
+
+    rng = np.random.default_rng(random_seed)
+    n   = len(stations)
+    lats, lons, rates = [], [], []
+
+    for _ in range(n_boot):
+        idx    = rng.integers(0, n, size=n)
+        sample = [stations[i] for i in idx]
+        try:
+            ev   = invert_euler_vector(sample)
+            pole = euler_vector_to_pole(ev)
+            lats.append(pole.lat)
+            lons.append(pole.lon)
+            rates.append(pole.rate)
+        except Exception:
+            pass
+
+    if len(lats) < 10:
+        return 0.0, 0.0, 0.0
+    return float(np.std(lats)), float(np.std(lons)), float(np.std(rates))
+
+
+def _total_chi2_static(clusters: list[VelocityCluster]) -> float:
+    """Module-level helper so EMEulerVectorClustering doesn't need self."""
+    total = 0.0
+    for c in clusters:
+        if c.chi2 is not None:
+            total += c.chi2
+        elif c.euler_vector is not None and len(c.stations) > 0:
+            total += total_chi_squared(c.stations, c.euler_vector)
+    return total

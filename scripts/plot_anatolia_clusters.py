@@ -21,6 +21,7 @@ from pathlib import Path
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import geopandas as gpd
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -35,14 +36,14 @@ from gps_cluster.application.velocity_clustering import VelocityHACClustering
 from gps_cluster.domain.services.euler_math import (
     euler_vector_to_pole,
     predict_velocity,
-    total_chi_squared,
 )
 from gps_cluster.infrastructure.readers.velocity_vel import read_vel_file
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent.parent
-DATA = ROOT / "data/raw/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
-OUT  = ROOT / "reports/anatolia"
+ROOT       = Path(__file__).parent.parent
+DATA       = ROOT / "data/raw/globk_vel_igs14_ITRF_M2E_11JAN2021_CMBND_improved_reformat.vel"
+FAULT_FILE = ROOT / "data/raw/anatolia_slip_rate_faults_simplified.geojson"
+OUT        = ROOT / "reports/anatolia"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── load data ─────────────────────────────────────────────────────────────────
@@ -284,7 +285,7 @@ plt.close(fig)
 # Figure 5 — Map: best-k clusters + velocity arrows
 # ═══════════════════════════════════════════════════════════════════════════════
 print(f"Plotting Fig 5: k={k_gap} cluster map (gap statistic) …")
-clusters_best = evc.cluster(stations, k=k_gap)
+clusters_best = ftest.solutions[k_gap]   # cached — no re-clustering
 
 fig, ax = plt.subplots(figsize=(16, 9),
                        subplot_kw={"projection": ccrs.Mercator()})
@@ -307,8 +308,7 @@ for c in clusters_best:
 _ref_arrow(ax)
 ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.9)
 
-chi2_best = sum(total_chi_squared(c.stations, c.euler_vector)
-                for c in clusters_best if c.euler_vector is not None)
+chi2_best = sum(c.chi2 for c in clusters_best if c.chi2 is not None)
 dof_best  = 2 * len(stations) - 3 * k_gap
 rms_best  = _rms(clusters_best)
 ax.set_title(f"Euler-vector clustering  k = {k_gap}  (gap statistic)\n"
@@ -326,12 +326,23 @@ fig, axes = plt.subplots(1, 2, figsize=(22, 9),
 _basemap(axes[0])
 _basemap(axes[1])
 
+if FAULT_FILE.exists():
+    _faults_gdf = gpd.read_file(FAULT_FILE).to_crs("EPSG:4326")
+    for _, row in _faults_gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        segs = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
+        for seg in segs:
+            xs, ys = seg.xy
+            axes[0].plot(list(xs), list(ys), transform=ccrs.PlateCarree(),
+                         color="black", lw=1.2, alpha=0.7, zorder=3)
+
 res_lons, res_lats, res_dve, res_dvn = [], [], [], []
 for c in clusters_best:
     if c.euler_vector is None:
         continue
     col = CMAP(c.id - 1)
-    _cluster_hull(axes[0], c.stations, color=col)
     _scatter(axes[0], c.stations, color=col, s=18)
     for s in c.stations:
         ve_p, vn_p = predict_velocity(s, c.euler_vector)
@@ -377,7 +388,7 @@ axes7 = axes7.flatten()
 
 for ax, k in zip(axes7, range(2, 8)):
     _basemap(ax)
-    clusters_k = evc.cluster(stations, k=k)
+    clusters_k = ftest.solutions[k]     # cached — no re-clustering
     all_clusters_k[k] = clusters_k
     for c in clusters_k:
         _scatter(ax, c.stations, color=CMAP(c.id - 1), s=10)
@@ -389,4 +400,58 @@ fig.suptitle("Euler-vector clustering — Anatolia GPS (ITRF14)\n"
 fig.savefig(OUT / "fig7_k2to7_clusters.png", dpi=150, bbox_inches="tight")
 plt.close(fig)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Figure 8 — Assignment entropy map at k = k_gap
+# High entropy = station is kinematically ambiguous (block boundary or
+# elastic loading near a locked fault).
+# ═══════════════════════════════════════════════════════════════════════════════
+print(f"Plotting Fig 8: assignment entropy map (k={k_gap}) …")
+from gps_cluster.domain.services.euler_math import assignment_probabilities
+
+probs, entropy = assignment_probabilities(stations, clusters_best)
+max_entropy = np.log(k_gap)   # theoretical maximum (uniform distribution)
+
+fig, ax = plt.subplots(figsize=(16, 8), subplot_kw={"projection": ccrs.Mercator()})
+_basemap(ax)
+
+lons = np.array([s.position.lon for s in stations])
+lats = np.array([s.position.lat for s in stations])
+
+sc = ax.scatter(lons, lats,
+                c=entropy, cmap="RdYlGn_r",
+                vmin=0, vmax=max_entropy,
+                s=22, edgecolors="k", linewidths=0.2,
+                transform=ccrs.PlateCarree(), zorder=4)
+
+cbar = fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02)
+cbar.set_label("Shannon entropy  (nats)\n0 = certain   log(k) = fully ambiguous",
+               fontsize=9)
+cbar.set_ticks([0, max_entropy / 2, max_entropy])
+cbar.set_ticklabels(["0\n(certain)", f"{max_entropy/2:.2f}",
+                     f"{max_entropy:.2f}\n(uniform)"])
+
+# Overlay fault traces
+if FAULT_FILE.exists():
+    _faults_gdf = gpd.read_file(FAULT_FILE).to_crs("EPSG:4326")
+    for _, row in _faults_gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        segs = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
+        for seg in segs:
+            xs, ys = seg.xy
+            ax.plot(list(xs), list(ys), transform=ccrs.PlateCarree(),
+                    color="black", lw=1.0, alpha=0.6, zorder=5)
+
+high_ent_pct = int(100 * np.mean(entropy > 0.5 * max_entropy))
+ax.set_title(
+    f"Assignment entropy — Euler-vector clustering k = {k_gap}  (ITRF14)\n"
+    f"Red = ambiguous (≥½ max entropy: {high_ent_pct}% of stations)   "
+    f"Green = certain   max entropy = log({k_gap}) = {max_entropy:.2f} nats",
+    fontsize=11)
+fig.savefig(OUT / "fig8_entropy.png", dpi=180, bbox_inches="tight")
+plt.close(fig)
+
 print(f"\nAll figures saved to {OUT}/")
+print(f"  Mean entropy: {entropy.mean():.3f} / {max_entropy:.3f} nats  "
+      f"({100*entropy.mean()/max_entropy:.0f}% of max)")

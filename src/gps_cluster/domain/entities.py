@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np  # noqa: F401 — used in type annotations via string literals
+
 
 @dataclass(frozen=True)
 class Position:
@@ -40,6 +42,7 @@ class EulerVector:
     ox: float
     oy: float
     oz: float
+    covariance: "np.ndarray | None" = field(default=None, repr=False, compare=False)
 
     def to_array(self):
         import numpy as np
@@ -54,6 +57,9 @@ class EulerPole:
     lat: float  # degrees north
     lon: float  # degrees east
     rate: float  # deg/Myr
+    sigma_lat: float = 0.0   # 1-sigma degrees
+    sigma_lon: float = 0.0   # 1-sigma degrees
+    sigma_rate: float = 0.0  # 1-sigma deg/Myr
 
 
 @dataclass
@@ -61,6 +67,13 @@ class VelocityCluster:
     id: int
     stations: list[GpsStation] = field(default_factory=list)
     euler_vector: EulerVector | None = None
+    chi2: float | None = None          # total weighted chi² (hard-assigned members)
+    chi2_reduced: float | None = None  # chi² / (2N - 3)
+    # EM soft-assignment: shape (N_total,) probability that each station in the
+    # *full* dataset belongs to this cluster.  None for hard-assignment clusters.
+    membership_weights: "np.ndarray | None" = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def size(self) -> int:
