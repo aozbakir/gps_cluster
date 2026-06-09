@@ -1,4 +1,4 @@
-"""Compute Euler-vector clustering for the Marlborough Fault System and write results to JSON.
+"""Compute Euler-vector clustering for the Marlborough Fault System and write JSON cache.
 
 Run this once (takes ~5 min with 50 restarts).  The JSON cache is then
 read by plot_marlborough_clusters.py for fast, compute-free plotting.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gps_cluster.application.euler_clustering import EulerVectorClustering
+from gps_cluster.application.euler_clustering import SpatialBayesianEulerClustering
 from gps_cluster.application.preprocess import filter_by_extent
 from gps_cluster.application.serialise import clusters_to_list, station_to_dict
 from gps_cluster.application.velocity_clustering import VelocityHACClustering
@@ -29,10 +29,11 @@ OUT    = ROOT / "results/marlborough"
 CACHE  = OUT / "clusters.json"
 OUT.mkdir(parents=True, exist_ok=True)
 
-EXTENT  = [171.0, 175.0, -43.5, -41.0]
-MAX_K   = 8
-N_REF   = 50
+EXTENT     = [171.0, 175.0, -43.5, -41.0]
+MAX_K      = 8
+N_REF      = 50
 N_RESTARTS = 50
+VB_GAMMA   = 4e-6        # distance-to-centroid prior: 1 / (500 km)²
 
 # ── load & filter ──────────────────────────────────────────────────────────────
 all_sta  = read_nz_csv(DATA, frame="itrf")
@@ -40,42 +41,55 @@ stations = filter_by_extent(all_sta, *EXTENT)
 N = len(stations)
 print(f"Marlborough box: {N} stations")
 
-# ── gap statistic (HAC on velocity space) ──────────────────────────────────────
+# ── gap statistic (velocity-space HAC, unchanged) ─────────────────────────────
 print(f"Running gap statistic (max_k={MAX_K}, n_ref={N_REF}) …")
 hac = VelocityHACClustering()
 _, gap_result = hac.find_optimal_k(stations, max_k=MAX_K, n_ref=N_REF)
 print(f"  first-crossing k = {gap_result.optimal_k}   max-gap k = {gap_result.k_max_gap}")
 
-# ── Euler-vector F-test ────────────────────────────────────────────────────────
-print(f"Running Euler F-test (max_k={MAX_K}) …")
-evc = EulerVectorClustering(init="multiscale", n_restarts=N_RESTARTS, random_seed=0)
-_, ftest = evc.find_optimal_k(stations, max_k=MAX_K)
+# ── VB F-test ─────────────────────────────────────────────────────────────────
+print(f"Running VB F-test (max_k={MAX_K}, n_restarts={N_RESTARTS}, γ={VB_GAMMA:.1e}) …")
+vbc = SpatialBayesianEulerClustering(
+    gamma=VB_GAMMA, n_restarts=N_RESTARTS, random_seed=0
+)
+_, ftest = vbc.find_optimal_k(stations, max_k=MAX_K)
 
 k_elbow = ftest.k_elbow
 print(f"  k_elbow (largest Δχ²_red) = {k_elbow}")
 
-# ── k-by-k cluster solutions ───────────────────────────────────────────────────
+# ── station records ───────────────────────────────────────────────────────────
+station_records = [station_to_dict(s) for s in stations]
+
+# ── k-by-k solutions: serialise + extract genuine VB entropy ──────────────────
 print(f"Serialising k=2…{MAX_K} solutions …")
 solutions: dict[int, list[dict]] = {}
+
+def _vb_entropy(clusters: list) -> np.ndarray:
+    W = np.column_stack([c.membership_weights for c in clusters])  # (N, K)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return -np.nansum(W * np.where(W > 0, np.log(W), 0.0), axis=1)
+
 for k in range(2, MAX_K + 1):
-    sol = clusters_to_list(ftest.solutions[k])
+    sol     = clusters_to_list(ftest.solutions[k])
+    entropy = _vb_entropy(ftest.solutions[k])
+    for s_rec, ent in zip(station_records, entropy):
+        s_rec[f"vb_entropy_k{k}"] = float(ent)
     solutions[k] = sol
     dof        = max(2 * N - 3 * k, 1)
     chi2_total = sum(c["chi2"] for c in sol)
-    print(f"  k={k}  χ²_red={chi2_total/dof:.2f}")
+    print(f"  k={k}  χ²_red={chi2_total/dof:.3f}  mean_vb_entropy={entropy.mean():.3f} nats")
 
-# ── serialise ─────────────────────────────────────────────────────────────────
-station_records = [station_to_dict(s) for s in stations]
-
+# ── cache ─────────────────────────────────────────────────────────────────────
 cache = {
     "meta": {
-        "n_stations":  N,
-        "extent":      EXTENT,
-        "max_k":       MAX_K,
-        "n_restarts":  N_RESTARTS,
-        "n_ref_gap":   N_REF,
-        "frame":       "ITRF2008",
-        "source":      "Beavan et al. 2016",
+        "n_stations": N,
+        "extent":     EXTENT,
+        "max_k":      MAX_K,
+        "n_restarts": N_RESTARTS,
+        "n_ref_gap":  N_REF,
+        "vb_gamma":   VB_GAMMA,
+        "frame":      "ITRF2008",
+        "source":     "Beavan et al. 2016",
     },
     "stations": station_records,
     "gap": {
